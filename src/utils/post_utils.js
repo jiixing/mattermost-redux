@@ -197,7 +197,7 @@ function extractUserActivityData(userActivities) {
     };
 
     const messageData = [];
-    const allUserIds = [];
+    const allUserIds = new Set();
 
     Object.entries(userActivities).forEach(([postType, values]) => {
         if (
@@ -217,12 +217,7 @@ function extractUserActivityData(userActivities) {
     messageData.sort((a, b) => postTypePriority[a.postType] > postTypePriority[b.postType]);
 
     return {
-        allUserIds: allUserIds.reduce((acc, curr) => {
-            if (!acc.includes(curr)) {
-                acc.push(curr);
-            }
-            return acc;
-        }, []),
+        allUserIds: Array.from(new Set(allUserIds)),
         messageData,
     };
 }

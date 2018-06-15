@@ -950,9 +950,7 @@ export async function getProfilesAndStatusesForPosts(posts, dispatch, getState) 
     const userIdsToLoad = new Set();
     const statusesToLoad = new Set();
 
-    Object.values(posts).forEach((post) => {
-        const userId = post.user_id;
-
+    function checkUserId(userId) {
         if (!statuses[userId]) {
             statusesToLoad.add(userId);
         }
@@ -963,6 +961,24 @@ export async function getProfilesAndStatusesForPosts(posts, dispatch, getState) 
 
         if (!profiles[userId]) {
             userIdsToLoad.add(userId);
+        }
+    }
+
+    Object.values(posts).forEach((post) => {
+        checkUserId(post.user_id);
+
+        if (post.props) {
+            if (post.props.userId) {
+                checkUserId(post.userId);
+            }
+
+            if (post.props.addedUserId) {
+                checkUserId(post.userId);
+            }
+
+            if (post.props.removedUserId) {
+                checkUserId(post.userId);
+            }
         }
     });
 
