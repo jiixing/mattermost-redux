@@ -1,40 +1,36 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {batchActions} from 'redux-batched-actions';
-
 import {Client4} from 'client';
 import websocketClient from 'client/websocket_client';
-import {getProfilesByIds, getStatusesByIds, loadProfilesForDirect} from './users';
+import {
+    checkForModifiedUsers,
+    getMe,
+    getProfilesByIds,
+    getStatusesByIds,
+    loadProfilesForDirect,
+} from './users';
 import {
     fetchMyChannelsAndMembers,
     getChannelAndMyMember,
     getChannelStats,
-    updateChannelHeader,
-    updateChannelPurpose,
-    markChannelAsUnread,
     markChannelAsRead,
-    selectChannel,
-    markChannelAsViewed,
 } from './channels';
 import {
     getPost,
     getPosts,
-    getPostsSince,
     getProfilesAndStatusesForPosts,
     getCustomEmojiForReaction,
+    handleNewPost,
+    postDeleted,
+    receivedPost,
 } from './posts';
 import {
-    getMyPreferences,
-    makeDirectChannelVisibleIfNecessary,
-    makeGroupMessageVisibleIfNecessary,
-} from './preferences';
-import {
-    getLicenseConfig,
-    getClientConfig,
-} from './general';
-
-import {getTeam, getTeams, getMyTeams, getMyTeamMembers, getMyTeamUnreads} from './teams';
+    getTeam,
+    getMyTeamUnreads,
+    getMyTeams,
+    getMyTeamMembers,
+} from './teams';
 
 import {
     ChannelTypes,
@@ -46,20 +42,30 @@ import {
     UserTypes,
     RoleTypes,
     AdminTypes,
+    IntegrationTypes,
 } from 'action_types';
-import {General, WebsocketEvents, Preferences, Posts} from 'constants';
+import {General, WebsocketEvents, Preferences} from 'constants';
 
-import {getChannel, getCurrentChannelStats} from 'selectors/entities/channels';
-import {getCurrentUser} from 'selectors/entities/users';
-import {getUserIdFromChannelName} from 'utils/channel_utils';
-import {isFromWebhook, isSystemMessage, getLastCreateAt, shouldIgnorePost} from 'utils/post_utils';
+import {getAllChannels, getChannel, getChannelsNameMapInTeam, getCurrentChannelId, getRedirectChannelNameForTeam, getCurrentChannelStats} from 'selectors/entities/channels';
+import {getConfig} from 'selectors/entities/general';
+import {getAllPosts} from 'selectors/entities/posts';
+import {getDirectShowPreferences} from 'selectors/entities/preferences';
+import {getCurrentTeamId, getCurrentTeamMembership, getTeams as getTeamsSelector} from 'selectors/entities/teams';
+import {getCurrentUser, getCurrentUserId, getUsers, getUserStatuses} from 'selectors/entities/users';
+import {getChannelByName} from 'utils/channel_utils';
+import {fromAutoResponder} from 'utils/post_utils';
 import EventEmitter from 'utils/event_emitter';
+
+let doDispatch;
 
 export function init(platform, siteUrl, token, optionalWebSocket, additionalOptions = {}) {
     return async (dispatch, getState) => {
-        const config = getState().entities.general.config;
+        const config = getConfig(getState());
         let connUrl = siteUrl || config.WebsocketURL || Client4.getUrl();
         const authToken = token || Client4.getToken();
+
+        // Set the dispatch and getState globally
+        doDispatch = dispatch;
 
         // replace the protocol with a websocket one
         if (platform !== 'ios' && platform !== 'android') {
@@ -96,603 +102,563 @@ export function init(platform, siteUrl, token, optionalWebSocket, additionalOpti
             websocketOpts.webSocketConnector = optionalWebSocket;
         }
 
-        return websocketClient.initialize(authToken, dispatch, getState, websocketOpts);
+        return websocketClient.initialize(authToken, websocketOpts);
     };
 }
 
 let reconnect = false;
 export function close(shouldReconnect = false) {
-    return async (dispatch, getState) => {
+    return async (dispatch) => {
         reconnect = shouldReconnect;
         websocketClient.close(true);
         if (dispatch) {
-            dispatch({type: GeneralTypes.WEBSOCKET_CLOSED}, getState);
+            dispatch({
+                type: GeneralTypes.WEBSOCKET_CLOSED,
+                timestamp: Date.now(),
+            });
         }
     };
 }
 
-function handleConnecting(dispatch, getState) {
-    dispatch({type: GeneralTypes.WEBSOCKET_REQUEST}, getState);
+export function doFirstConnect(now) {
+    return async (dispatch, getState) => {
+        const state = getState();
+
+        if (state.websocket.lastDisconnectAt) {
+            dispatch(checkForModifiedUsers());
+        }
+
+        dispatch({
+            type: GeneralTypes.WEBSOCKET_SUCCESS,
+            timestamp: now,
+        });
+    };
 }
 
-function handleFirstConnect(dispatch, getState) {
-    dispatch({type: GeneralTypes.WEBSOCKET_SUCCESS}, getState);
+export function doReconnect(now) {
+    return async (dispatch, getState) => {
+        const state = getState();
+        const currentTeamId = getCurrentTeamId(state);
+        const currentChannelId = getCurrentChannelId(state);
+        const currentUserId = getCurrentUserId(state);
+
+        if (currentTeamId) {
+            const dmPrefs = getDirectShowPreferences(state);
+            const statusesToLoad = {
+                [currentUserId]: true,
+            };
+
+            for (const pref of dmPrefs) {
+                if (pref.value === 'true') {
+                    statusesToLoad[pref.name] = true;
+                }
+            }
+
+            dispatch(getStatusesByIds(Object.keys(statusesToLoad)));
+            dispatch(getMyTeamUnreads());
+
+            // We need to wait for these actions so that we have an
+            // up-to-date state of the current user's team memberships.
+            await dispatch(getMyTeams());
+            await dispatch(getMyTeamMembers());
+            const currentTeamMembership = getCurrentTeamMembership(getState());
+            if (currentTeamMembership) {
+                dispatch(getPosts(currentChannelId));
+                const {data} = await dispatch(fetchMyChannelsAndMembers(currentTeamId));
+                dispatch(loadProfilesForDirect());
+
+                if (data && data.members) {
+                    const stillMemberOfCurrentChannel = data.members.find((m) => m.channel_id === currentChannelId);
+                    if (!stillMemberOfCurrentChannel) {
+                        EventEmitter.emit(General.SWITCH_TO_DEFAULT_CHANNEL, currentTeamId);
+                    }
+                }
+            } else {
+                // If the user is no longer a member of this team when reconnecting
+                const newMsg = {
+                    data: {
+                        user_id: currentUserId,
+                        team_id: currentTeamId,
+                    },
+                };
+                dispatch(handleLeaveTeamEvent(newMsg));
+            }
+        }
+
+        dispatch(checkForModifiedUsers());
+
+        dispatch({
+            type: GeneralTypes.WEBSOCKET_SUCCESS,
+            timestamp: now,
+        });
+    };
+}
+
+function handleConnecting() {
+    doDispatch({type: GeneralTypes.WEBSOCKET_REQUEST});
+}
+
+function handleFirstConnect() {
+    const now = Date.now();
+
     if (reconnect) {
         reconnect = false;
-
-        handleReconnect(dispatch, getState).catch(() => {}); //eslint-disable-line no-empty-function
+        doDispatch(doReconnect(now));
+    } else {
+        doDispatch(doFirstConnect(now));
     }
 }
 
-async function handleReconnect(dispatch, getState) {
-    const entities = getState().entities;
-    const {currentTeamId} = entities.teams;
-    const {currentChannelId} = entities.channels;
-    const {currentUserId} = entities.users;
-
-    getLicenseConfig()(dispatch, getState);
-    getClientConfig()(dispatch, getState);
-    getMyPreferences()(dispatch, getState);
-
-    if (currentTeamId) {
-        getMyTeams()(dispatch, getState);
-        getMyTeamMembers()(dispatch, getState);
-        getMyTeamUnreads()(dispatch, getState).then(async () => {
-            await fetchMyChannelsAndMembers(currentTeamId)(dispatch, getState);
-            if (currentChannelId) {
-                markChannelAsRead(currentChannelId)(dispatch, getState);
-            }
-        });
-        loadProfilesForDirect()(dispatch, getState);
-        getTeams()(dispatch, getState);
-
-        const {myMembers: myTeamMembers} = getState().entities.teams;
-        if (!myTeamMembers[currentTeamId]) {
-            // If the user is no longer a member of this team when reconnecting
-            const newMsg = {
-                data: {
-                    user_id: currentUserId,
-                    team_id: currentTeamId,
-                },
-            };
-            handleLeaveTeamEvent(newMsg, dispatch, getState);
-            return dispatch({type: GeneralTypes.WEBSOCKET_SUCCESS}, getState);
-        }
-
-        const {channels, myMembers} = getState().entities.channels;
-        if (!myMembers[currentChannelId]) {
-            // in case the user is not a member of the channel when reconnecting
-            const defaultChannel = Object.values(channels).find((c) => c.team_id === currentTeamId && c.name === General.DEFAULT_CHANNEL);
-
-            // emit the event so the client can change his own state
-            if (defaultChannel) {
-                EventEmitter.emit(General.DEFAULT_CHANNEL, defaultChannel.display_name);
-                selectChannel(defaultChannel.id)(dispatch, getState);
-            }
-            return dispatch({type: GeneralTypes.WEBSOCKET_SUCCESS}, getState);
-        }
-
-        if (currentChannelId) {
-            loadPostsHelper(currentChannelId, dispatch, getState);
-        }
-    }
-
-    return dispatch({type: GeneralTypes.WEBSOCKET_SUCCESS}, getState);
+function handleReconnect() {
+    doDispatch(doReconnect(Date.now()));
 }
 
-function handleClose(connectFailCount, dispatch, getState) {
-    dispatch({type: GeneralTypes.WEBSOCKET_FAILURE, error: connectFailCount}, getState);
+function handleClose(connectFailCount) {
+    doDispatch({
+        type: GeneralTypes.WEBSOCKET_FAILURE,
+        error: connectFailCount,
+        timestamp: Date.now(),
+    });
 }
 
-function handleEvent(msg, dispatch, getState) {
+function handleEvent(msg) {
     switch (msg.event) {
     case WebsocketEvents.POSTED:
     case WebsocketEvents.EPHEMERAL_MESSAGE:
-        handleNewPostEvent(msg, dispatch, getState);
+        doDispatch(handleNewPostEvent(msg));
         break;
     case WebsocketEvents.POST_EDITED:
-        handlePostEdited(msg, dispatch, getState);
+        doDispatch(handlePostEdited(msg));
         break;
     case WebsocketEvents.POST_DELETED:
-        handlePostDeleted(msg, dispatch, getState);
+        doDispatch(handlePostDeleted(msg));
         break;
     case WebsocketEvents.LEAVE_TEAM:
-        handleLeaveTeamEvent(msg, dispatch, getState);
+        doDispatch(handleLeaveTeamEvent(msg));
         break;
     case WebsocketEvents.UPDATE_TEAM:
-        handleUpdateTeamEvent(msg, dispatch, getState);
+        doDispatch(handleUpdateTeamEvent(msg));
         break;
-
+    case WebsocketEvents.PATCH_TEAM:
+        doDispatch(handlePatchTeamEvent(msg));
+        break;
     case WebsocketEvents.ADDED_TO_TEAM:
-        handleTeamAddedEvent(msg, dispatch, getState);
+        doDispatch(handleTeamAddedEvent(msg));
         break;
     case WebsocketEvents.USER_ADDED:
-        handleUserAddedEvent(msg, dispatch, getState);
+        doDispatch(handleUserAddedEvent(msg));
         break;
     case WebsocketEvents.USER_REMOVED:
-        handleUserRemovedEvent(msg, dispatch, getState);
+        doDispatch(handleUserRemovedEvent(msg));
         break;
     case WebsocketEvents.USER_UPDATED:
-        handleUserUpdatedEvent(msg, dispatch, getState);
+        doDispatch(handleUserUpdatedEvent(msg));
         break;
     case WebsocketEvents.ROLE_ADDED:
-        handleRoleAddedEvent(msg, dispatch, getState);
+        doDispatch(handleRoleAddedEvent(msg));
         break;
     case WebsocketEvents.ROLE_REMOVED:
-        handleRoleRemovedEvent(msg, dispatch, getState);
+        doDispatch(handleRoleRemovedEvent(msg));
         break;
     case WebsocketEvents.ROLE_UPDATED:
-        handleRoleUpdatedEvent(msg, dispatch, getState);
+        doDispatch(handleRoleUpdatedEvent(msg));
         break;
     case WebsocketEvents.CHANNEL_CREATED:
-        handleChannelCreatedEvent(msg, dispatch, getState);
+        doDispatch(handleChannelCreatedEvent(msg));
         break;
     case WebsocketEvents.CHANNEL_DELETED:
-        handleChannelDeletedEvent(msg, dispatch, getState);
+        doDispatch(handleChannelDeletedEvent(msg));
         break;
     case WebsocketEvents.CHANNEL_UPDATED:
-        handleChannelUpdatedEvent(msg, dispatch, getState);
+        doDispatch(handleChannelUpdatedEvent(msg));
         break;
     case WebsocketEvents.CHANNEL_CONVERTED:
-        handleChannelConvertedEvent(msg, dispatch, getState);
+        doDispatch(handleChannelConvertedEvent(msg));
         break;
     case WebsocketEvents.CHANNEL_VIEWED:
-        handleChannelViewedEvent(msg, dispatch, getState);
+        doDispatch(handleChannelViewedEvent(msg));
         break;
     case WebsocketEvents.CHANNEL_MEMBER_UPDATED:
-        handleChannelMemberUpdatedEvent(msg, dispatch);
+        doDispatch(handleChannelMemberUpdatedEvent(msg));
         break;
     case WebsocketEvents.DIRECT_ADDED:
-        handleDirectAddedEvent(msg, dispatch, getState);
+        doDispatch(handleDirectAddedEvent(msg));
         break;
     case WebsocketEvents.PREFERENCE_CHANGED:
-        handlePreferenceChangedEvent(msg, dispatch, getState);
+        doDispatch(handlePreferenceChangedEvent(msg));
         break;
     case WebsocketEvents.PREFERENCES_CHANGED:
-        handlePreferencesChangedEvent(msg, dispatch, getState);
+        doDispatch(handlePreferencesChangedEvent(msg));
         break;
     case WebsocketEvents.PREFERENCES_DELETED:
-        handlePreferencesDeletedEvent(msg, dispatch, getState);
+        doDispatch(handlePreferencesDeletedEvent(msg));
         break;
     case WebsocketEvents.STATUS_CHANGED:
-        handleStatusChangedEvent(msg, dispatch, getState);
+        doDispatch(handleStatusChangedEvent(msg));
         break;
     case WebsocketEvents.TYPING:
-        handleUserTypingEvent(msg, dispatch, getState);
+        doDispatch(handleUserTypingEvent(msg));
         break;
     case WebsocketEvents.HELLO:
         handleHelloEvent(msg);
         break;
     case WebsocketEvents.REACTION_ADDED:
-        handleReactionAddedEvent(msg, dispatch, getState);
+        doDispatch(handleReactionAddedEvent(msg));
         break;
     case WebsocketEvents.REACTION_REMOVED:
-        handleReactionRemovedEvent(msg, dispatch, getState);
+        doDispatch(handleReactionRemovedEvent(msg));
         break;
     case WebsocketEvents.EMOJI_ADDED:
-        handleAddEmoji(msg, dispatch, getState);
+        doDispatch(handleAddEmoji(msg));
         break;
     case WebsocketEvents.LICENSE_CHANGED:
-        handleLicenseChangedEvent(msg, dispatch, getState);
+        doDispatch(handleLicenseChangedEvent(msg));
         break;
     case WebsocketEvents.CONFIG_CHANGED:
-        handleConfigChangedEvent(msg, dispatch, getState);
+        doDispatch(handleConfigChangedEvent(msg));
         break;
     case WebsocketEvents.PLUGIN_STATUSES_CHANGED:
-        handlePluginStatusesChangedEvent(msg, dispatch, getState);
+        doDispatch(handlePluginStatusesChangedEvent(msg));
+        break;
+    case WebsocketEvents.OPEN_DIALOG:
+        doDispatch(handleOpenDialogEvent(msg));
         break;
     }
 }
 
-async function handleNewPostEvent(msg, dispatch, getState) {
-    const state = getState();
-    const {currentChannelId} = state.entities.channels;
-    const users = state.entities.users;
-    const {posts} = state.entities.posts;
-    const post = JSON.parse(msg.data.post);
-    const userId = post.user_id;
-    const currentUserId = users.currentUserId;
-    const status = users.statuses[userId];
+function handleNewPostEvent(msg) {
+    return async (dispatch, getState) => {
+        const post = JSON.parse(msg.data.post);
 
-    getProfilesAndStatusesForPosts([post], dispatch, getState);
+        dispatch(handleNewPost(msg));
+        getProfilesAndStatusesForPosts([post], dispatch, getState);
 
-    // getProfilesAndStatusesForPosts only gets the status if it doesn't exist, but we
-    // also want it if the user does not appear to be online
-    if (userId !== currentUserId && status && status !== General.ONLINE) {
-        getStatusesByIds([userId])(dispatch, getState);
-    }
-
-    switch (post.type) {
-    case Posts.POST_TYPES.HEADER_CHANGE:
-        updateChannelHeader(post.channel_id, post.props.new_header)(dispatch, getState);
-        break;
-    case Posts.POST_TYPES.PURPOSE_CHANGE:
-        updateChannelPurpose(post.channel_id, post.props.new_purpose)(dispatch, getState);
-        break;
-    }
-
-    if (post.root_id && !posts[post.root_id]) {
-        let data;
-        try {
-            data = await Client4.getPostThread(post.root_id);
-        } catch (e) {
-            console.warn('failed to get thread for new post event', e); // eslint-disable-line no-console
-        }
-
-        if (data) {
-            const rootUserId = data.posts[post.root_id].user_id;
-            const rootStatus = users.statuses[rootUserId];
-            if (!users.profiles[rootUserId] && rootUserId !== currentUserId) {
-                getProfilesByIds([rootUserId])(dispatch, getState);
-            }
-
-            if (rootStatus !== General.ONLINE) {
-                getStatusesByIds([rootUserId])(dispatch, getState);
-            }
-
+        if (post.user_id !== getCurrentUserId(getState()) && !fromAutoResponder(post)) {
             dispatch({
-                type: PostTypes.RECEIVED_POSTS,
-                data,
-                channelId: post.channel_id,
-            }, getState);
+                type: UserTypes.RECEIVED_STATUSES,
+                data: [{user_id: post.user_id, status: General.ONLINE}],
+            });
         }
-    }
+    };
+}
 
-    const actions = [{
-        type: WebsocketEvents.STOP_TYPING,
-        data: {
-            id: post.channel_id + post.root_id,
-            userId: post.user_id,
-        },
-    }];
+function handlePostEdited(msg) {
+    return (dispatch, getState) => {
+        const data = JSON.parse(msg.data.post);
 
-    if (!posts[post.id]) {
-        if (msg.data.channel_type === General.DM_CHANNEL) {
-            const otherUserId = getUserIdFromChannelName(currentUserId, msg.data.channel_name);
-            makeDirectChannelVisibleIfNecessary(otherUserId)(dispatch, getState);
-        } else if (msg.data.channel_type === General.GM_CHANNEL) {
-            makeGroupMessageVisibleIfNecessary(post.channel_id)(dispatch, getState);
+        getProfilesAndStatusesForPosts([data], dispatch, getState);
+        dispatch(receivedPost(data));
+    };
+}
+
+function handlePostDeleted(msg) {
+    const data = JSON.parse(msg.data.post);
+
+    return postDeleted(data);
+}
+
+function handleLeaveTeamEvent(msg) {
+    return (dispatch, getState) => {
+        const state = getState();
+        const teams = getTeamsSelector(state);
+        const currentTeamId = getCurrentTeamId(state);
+        const currentUserId = getCurrentUserId(state);
+
+        if (currentUserId === msg.data.user_id) {
+            dispatch({type: TeamTypes.LEAVE_TEAM, data: teams[msg.data.team_id]});
+
+            // if they are on the team being removed deselect the current team and channel
+            if (currentTeamId === msg.data.team_id) {
+                EventEmitter.emit('leave_team');
+            }
         }
+    };
+}
 
-        actions.push({
-            type: PostTypes.RECEIVED_POSTS,
+function handleUpdateTeamEvent(msg) {
+    return {
+        type: TeamTypes.UPDATED_TEAM,
+        data: JSON.parse(msg.data.team),
+    };
+}
+
+function handlePatchTeamEvent(msg) {
+    return {
+        type: TeamTypes.PATCHED_TEAM,
+        data: JSON.parse(msg.data.team),
+    };
+}
+
+function handleTeamAddedEvent(msg) {
+    return async (dispatch) => {
+        await Promise.all([
+            dispatch(getTeam(msg.data.team_id)),
+            dispatch(getMyTeamUnreads()),
+        ]);
+    };
+}
+
+function handleUserAddedEvent(msg) {
+    return (dispatch, getState) => {
+        const state = getState();
+        const currentChannelId = getCurrentChannelId(state);
+        const currentTeamId = getCurrentTeamId(state);
+        const currentUserId = getCurrentUserId(state);
+        const teamId = msg.data.team_id;
+
+        dispatch({
+            type: ChannelTypes.CHANNEL_MEMBER_ADDED,
             data: {
-                order: [],
-                posts: {
-                    [post.id]: post,
+                channel_id: msg.broadcast.channel_id,
+                user_id: msg.data.user_id,
+            },
+        }, getState);
+
+        if (msg.broadcast.channel_id === currentChannelId) {
+            dispatch(getChannelStats(teamId, currentChannelId));
+        }
+
+        if (teamId === currentTeamId && msg.data.user_id === currentUserId) {
+            dispatch(getChannelAndMyMember(msg.broadcast.channel_id));
+        }
+    };
+}
+
+function handleUserRemovedEvent(msg) {
+    return (dispatch, getState) => {
+        const state = getState();
+        const channels = getAllChannels(state);
+        const currentChannelId = getCurrentChannelId(state);
+        const currentTeamId = getCurrentTeamId(state);
+        const currentUserId = getCurrentUserId(state);
+
+        dispatch({
+            type: ChannelTypes.CHANNEL_MEMBER_REMOVED,
+            data: {
+                channel_id: msg.broadcast.channel_id,
+                user_id: msg.data.user_id,
+            },
+        }, getState);
+
+        if (msg.broadcast.user_id === currentUserId && currentTeamId) {
+            const channel = channels[currentChannelId];
+
+            dispatch(fetchMyChannelsAndMembers(currentTeamId));
+
+            if (channel) {
+                dispatch({
+                    type: ChannelTypes.LEAVE_CHANNEL,
+                    data: {
+                        id: msg.data.channel_id,
+                        user_id: currentUserId,
+                        team_id: channel.team_id,
+                        type: channel.type,
+                    },
+                });
+            }
+
+            if (msg.data.channel_id === currentChannelId) {
+                // emit the event so the client can change his own state
+                EventEmitter.emit(General.SWITCH_TO_DEFAULT_CHANNEL, currentTeamId);
+            }
+        } else if (msg.data.channel_id === currentChannelId) {
+            dispatch(getChannelStats(currentTeamId, currentChannelId));
+        }
+    };
+}
+
+function handleUserUpdatedEvent(msg) {
+    return (dispatch, getState) => {
+        const currentUser = getCurrentUser(getState());
+        const user = msg.data.user;
+
+        if (user.id === currentUser.id) {
+            if (user.update_at > currentUser.update_at) {
+                // Need to request me to make sure we don't override with sanitized fields from the
+                // websocket event
+                dispatch(getMe());
+            }
+        } else {
+            dispatch({
+                type: UserTypes.RECEIVED_PROFILES,
+                data: {
+                    [user.id]: user,
                 },
-            },
-            channelId: post.channel_id,
-        });
-    }
-
-    dispatch(batchActions(actions), getState);
-
-    if (shouldIgnorePost(post)) {
-        // if the post type is in the ignore list we'll do nothing with the read state
-        return;
-    }
-
-    let markAsRead = false;
-    let markAsReadOnServer = false;
-    if (userId === currentUserId && !isSystemMessage(post) && !isFromWebhook(post)) {
-        // In case the current user posted the message and that message wasn't triggered by a system message
-        markAsRead = true;
-        markAsReadOnServer = false;
-    } else if (post.channel_id === currentChannelId) {
-        // if the post is for the channel that the user is currently viewing we'll mark the channel as read
-        markAsRead = true;
-        markAsReadOnServer = true;
-    }
-
-    if (markAsRead) {
-        markChannelAsRead(post.channel_id, null, markAsReadOnServer)(dispatch, getState);
-        markChannelAsViewed(post.channel_id)(dispatch, getState);
-    } else {
-        markChannelAsUnread(msg.data.team_id, post.channel_id, msg.data.mentions)(dispatch, getState);
-    }
-}
-
-function handlePostEdited(msg, dispatch, getState) {
-    const data = JSON.parse(msg.data.post);
-
-    getProfilesAndStatusesForPosts([data], dispatch, getState);
-
-    dispatch({type: PostTypes.RECEIVED_POST, data}, getState);
-}
-
-function handlePostDeleted(msg, dispatch, getState) {
-    const data = JSON.parse(msg.data.post);
-    dispatch({type: PostTypes.POST_DELETED, data}, getState);
-}
-
-function handleLeaveTeamEvent(msg, dispatch, getState) {
-    const entities = getState().entities;
-    const {currentTeamId, teams} = entities.teams;
-    const {currentUserId} = entities.users;
-
-    if (currentUserId === msg.data.user_id) {
-        dispatch({type: TeamTypes.LEAVE_TEAM, data: teams[msg.data.team_id]}, getState);
-
-        // if they are on the team being removed deselect the current team and channel
-        if (currentTeamId === msg.data.team_id) {
-            EventEmitter.emit('leave_team');
+            });
         }
-    }
+    };
 }
 
-function handleUpdateTeamEvent(msg, dispatch, getState) {
-    dispatch({type: TeamTypes.UPDATED_TEAM, data: JSON.parse(msg.data.team)}, getState);
-}
-
-async function handleTeamAddedEvent(msg, dispatch, getState) {
-    await Promise.all([
-        getTeam(msg.data.team_id)(dispatch, getState),
-        getMyTeamUnreads()(dispatch, getState),
-    ]);
-}
-
-function handleUserAddedEvent(msg, dispatch, getState) {
-    const state = getState();
-    const {currentChannelId} = state.entities.channels;
-    const {currentTeamId} = state.entities.teams;
-    const {currentUserId} = state.entities.users;
-    const teamId = msg.data.team_id;
-
-    if (msg.broadcast.channel_id === currentChannelId) {
-        getChannelStats(teamId, currentChannelId)(dispatch, getState);
-    }
-
-    if (teamId === currentTeamId && msg.data.user_id === currentUserId) {
-        getChannelAndMyMember(msg.broadcast.channel_id)(dispatch, getState);
-    }
-}
-
-function handleUserRemovedEvent(msg, dispatch, getState) {
-    const state = getState();
-    const {channels, currentChannelId} = state.entities.channels;
-    const {currentTeamId} = state.entities.teams;
-    const {currentUserId} = state.entities.users;
-
-    if (msg.broadcast.user_id === currentUserId && currentTeamId) {
-        fetchMyChannelsAndMembers(currentTeamId)(dispatch, getState);
-        const channel = channels[currentChannelId] || {};
-        dispatch({
-            type: ChannelTypes.LEAVE_CHANNEL,
-            data: {
-                id: msg.data.channel_id,
-                user_id: currentUserId,
-                team_id: channel.team_id,
-                type: channel.type,
-            },
-        }, getState);
-
-        if (msg.data.channel_id === currentChannelId) {
-            const defaultChannel = Object.values(channels).find((c) => c.team_id === currentTeamId && c.name === General.DEFAULT_CHANNEL);
-
-            // emit the event so the client can change his own state
-            EventEmitter.emit(General.DEFAULT_CHANNEL, defaultChannel.display_name);
-            selectChannel(defaultChannel.id)(dispatch, getState);
-        }
-    } else if (msg.data.channel_id === currentChannelId) {
-        getChannelStats(currentTeamId, currentChannelId)(dispatch, getState);
-    }
-}
-
-function handleUserUpdatedEvent(msg, dispatch, getState) {
-    const currentUser = getCurrentUser(getState());
-    const user = msg.data.user;
-
-    if (user.id === currentUser.id) {
-        dispatch({
-            type: UserTypes.RECEIVED_ME,
-            data: {
-                ...currentUser,
-                last_picture_update: user.last_picture_update,
-            },
-        });
-    } else {
-        dispatch({
-            type: UserTypes.RECEIVED_PROFILES,
-            data: {
-                [user.id]: user,
-            },
-        }, getState);
-    }
-}
-
-function handleRoleAddedEvent(msg, dispatch) {
+function handleRoleAddedEvent(msg) {
     const role = JSON.parse(msg.data.role);
 
-    dispatch({
+    return {
         type: RoleTypes.RECEIVED_ROLE,
         data: role,
-    });
+    };
 }
 
-function handleRoleRemovedEvent(msg, dispatch) {
+function handleRoleRemovedEvent(msg) {
     const role = JSON.parse(msg.data.role);
 
-    dispatch({
+    return {
         type: RoleTypes.ROLE_DELETED,
         data: role,
-    });
+    };
 }
 
-function handleRoleUpdatedEvent(msg, dispatch) {
+function handleRoleUpdatedEvent(msg) {
     const role = JSON.parse(msg.data.role);
 
-    dispatch({
+    return {
         type: RoleTypes.RECEIVED_ROLE,
         data: role,
-    });
+    };
 }
 
-function handleChannelCreatedEvent(msg, dispatch, getState) {
-    const {channel_id: channelId, team_id: teamId} = msg.data;
-    const state = getState();
-    const {channels} = state.entities.channels;
-    const {currentTeamId} = state.entities.teams;
+function handleChannelCreatedEvent(msg) {
+    return (dispatch, getState) => {
+        const {channel_id: channelId, team_id: teamId} = msg.data;
+        const state = getState();
+        const channels = getAllChannels(state);
+        const currentTeamId = getCurrentTeamId(state);
 
-    if (teamId === currentTeamId && !channels[channelId]) {
-        getChannelAndMyMember(channelId)(dispatch, getState);
-    }
+        if (teamId === currentTeamId && !channels[channelId]) {
+            dispatch(getChannelAndMyMember(channelId));
+        }
+    };
 }
 
-function handleChannelDeletedEvent(msg, dispatch, getState) {
-    const entities = getState().entities;
-    const {channels, currentChannelId, channelsInTeam} = entities.channels;
-    const {currentTeamId} = entities.teams;
+function handleChannelDeletedEvent(msg) {
+    return (dispatch, getState) => {
+        const state = getState();
+        const currentChannelId = getCurrentChannelId(state);
+        const currentTeamId = getCurrentTeamId(state);
+        const config = getConfig(state);
+        const viewArchivedChannels = config.ExperimentalViewArchivedChannels === 'true';
 
-    if (msg.broadcast.team_id === currentTeamId) {
-        if (msg.data.channel_id === currentChannelId) {
-            let channelId = '';
-            const teamChannels = Array.from(channelsInTeam[currentTeamId]);
-            const channel = teamChannels.filter((key) => channels[key].name === General.DEFAULT_CHANNEL);
-
-            if (channel.length) {
-                channelId = channel[0];
+        if (msg.broadcast.team_id === currentTeamId) {
+            if (msg.data.channel_id === currentChannelId && !viewArchivedChannels) {
+                const channelsInTeam = getChannelsNameMapInTeam(state, currentTeamId);
+                const channel = getChannelByName(channelsInTeam, getRedirectChannelNameForTeam(state, currentTeamId));
+                if (channel && channel.id) {
+                    dispatch({type: ChannelTypes.SELECT_CHANNEL, data: channel.id});
+                }
+                EventEmitter.emit(General.DEFAULT_CHANNEL, '');
             }
 
-            dispatch({type: ChannelTypes.SELECT_CHANNEL, data: channelId}, getState);
-            EventEmitter.emit(General.DEFAULT_CHANNEL, '');
-        }
-        dispatch({type: ChannelTypes.RECEIVED_CHANNEL_DELETED, data: msg.data.channel_id}, getState);
+            dispatch({type: ChannelTypes.RECEIVED_CHANNEL_DELETED, data: {id: msg.data.channel_id, team_id: msg.data.team_id, deleteAt: msg.data.delete_at, viewArchivedChannels}}, getState);
 
-        fetchMyChannelsAndMembers(currentTeamId)(dispatch, getState);
-    }
+            dispatch(fetchMyChannelsAndMembers(currentTeamId));
+        }
+    };
 }
 
-function handleChannelUpdatedEvent(msg, dispatch, getState) {
-    let channel;
-    try {
-        channel = msg.data ? JSON.parse(msg.data.channel) : null;
-    } catch (err) {
-        return;
-    }
-
-    const entities = getState().entities;
-    const {currentChannelId} = entities.channels;
-    if (channel) {
-        dispatch({
-            type: ChannelTypes.RECEIVED_CHANNEL,
-            data: channel,
-        });
-
-        if (currentChannelId === channel.id) {
-            // Emit an event with the channel received as we need to handle
-            // the changes without listening to the store
-            EventEmitter.emit(WebsocketEvents.CHANNEL_UPDATED, channel);
+function handleChannelUpdatedEvent(msg) {
+    return (dispatch, getState) => {
+        let channel;
+        try {
+            channel = msg.data ? JSON.parse(msg.data.channel) : null;
+        } catch (err) {
+            return;
         }
-    }
-}
 
-// handleChannelConvertedEvent handles updating of channel which is converted from public to private
-function handleChannelConvertedEvent(msg, dispatch, getState) {
-    const channelId = msg.data.channel_id;
-    if (channelId) {
-        const channel = getChannel(getState(), channelId);
+        const currentChannelId = getCurrentChannelId(getState());
         if (channel) {
             dispatch({
                 type: ChannelTypes.RECEIVED_CHANNEL,
-                data: {...channel, type: General.PRIVATE_CHANNEL},
+                data: channel,
             });
+
+            if (currentChannelId === channel.id) {
+                // Emit an event with the channel received as we need to handle
+                // the changes without listening to the store
+                EventEmitter.emit(WebsocketEvents.CHANNEL_UPDATED, channel);
+            }
         }
-    }
+    };
 }
 
-function handleChannelViewedEvent(msg, dispatch, getState) {
-    const {currentChannelId} = getState().entities.channels;
-    const {channel_id: channelId} = msg.data;
-
-    if (channelId !== currentChannelId) {
-        markChannelAsRead(channelId, null, false)(dispatch, getState);
-        markChannelAsViewed(channelId)(dispatch, getState);
-    }
+// handleChannelConvertedEvent handles updating of channel which is converted from public to private
+function handleChannelConvertedEvent(msg) {
+    return (dispatch, getState) => {
+        const channelId = msg.data.channel_id;
+        if (channelId) {
+            const channel = getChannel(getState(), channelId);
+            if (channel) {
+                dispatch({
+                    type: ChannelTypes.RECEIVED_CHANNEL,
+                    data: {...channel, type: General.PRIVATE_CHANNEL},
+                });
+            }
+        }
+    };
 }
 
-function handleChannelMemberUpdatedEvent(msg, dispatch) {
+function handleChannelViewedEvent(msg) {
+    return (dispatch, getState) => {
+        const state = getState();
+        const {channel_id: channelId} = msg.data;
+        const currentChannelId = getCurrentChannelId(state);
+        const currentUserId = getCurrentUserId(state);
+
+        if (channelId !== currentChannelId && currentUserId === msg.broadcast.user_id) {
+            dispatch(markChannelAsRead(channelId, null, false));
+        }
+    };
+}
+
+function handleChannelMemberUpdatedEvent(msg) {
     const channelMember = JSON.parse(msg.data.channelMember);
-    dispatch({type: ChannelTypes.RECEIVED_MY_CHANNEL_MEMBER, data: channelMember});
+
+    return {
+        type: ChannelTypes.RECEIVED_MY_CHANNEL_MEMBER,
+        data: channelMember,
+    };
 }
 
-function handleDirectAddedEvent(msg, dispatch, getState) {
-    getChannelAndMyMember(msg.broadcast.channel_id)(dispatch, getState);
+function handleDirectAddedEvent(msg) {
+    return (dispatch) => {
+        dispatch(getChannelAndMyMember(msg.broadcast.channel_id));
+    };
 }
 
-function handlePreferenceChangedEvent(msg, dispatch, getState) {
-    const preference = JSON.parse(msg.data.preference);
-    dispatch({type: PreferenceTypes.RECEIVED_PREFERENCES, data: [preference]}, getState);
+function handlePreferenceChangedEvent(msg) {
+    return (dispatch) => {
+        const preference = JSON.parse(msg.data.preference);
+        dispatch({type: PreferenceTypes.RECEIVED_PREFERENCES, data: [preference]});
 
-    getAddedDmUsersIfNecessary([preference], dispatch, getState);
+        dispatch(getAddedDmUsersIfNecessary([preference]));
+    };
 }
 
-function handlePreferencesChangedEvent(msg, dispatch, getState) {
+function handlePreferencesChangedEvent(msg) {
+    return (dispatch, getState) => {
+        const preferences = JSON.parse(msg.data.preferences);
+        const posts = getAllPosts(getState());
+
+        preferences.forEach((pref) => {
+            if (pref.category === Preferences.CATEGORY_FLAGGED_POST && !posts[pref.name]) {
+                dispatch(getPost(pref.name));
+            }
+        });
+
+        dispatch(getAddedDmUsersIfNecessary(preferences));
+        dispatch({type: PreferenceTypes.RECEIVED_PREFERENCES, data: preferences});
+    };
+}
+
+function handlePreferencesDeletedEvent(msg) {
     const preferences = JSON.parse(msg.data.preferences);
 
-    getAddedPostsIfNecessary(preferences, dispatch, getState);
-    getAddedDmUsersIfNecessary(preferences, dispatch, getState);
-    dispatch({type: PreferenceTypes.RECEIVED_PREFERENCES, data: preferences});
+    return {type: PreferenceTypes.DELETED_PREFERENCES, data: preferences};
 }
 
-function getAddedPostsIfNecessary(preferences, dispatch, getState) {
-    const state = getState();
-    const {posts} = state.entities.posts;
-    preferences.forEach((pref) => {
-        if (pref.category === Preferences.CATEGORY_FLAGGED_POST && !posts[pref.name]) {
-            dispatch(getPost(pref.name));
-        }
-    });
-}
-
-function getAddedDmUsersIfNecessary(preferences, dispatch, getState) {
-    const userIds = [];
-
-    for (const preference of preferences) {
-        if (preference.category === Preferences.CATEGORY_DIRECT_CHANNEL_SHOW && preference.value === 'true') {
-            userIds.push(preference.name);
-        }
-    }
-
-    if (userIds.length === 0) {
-        return;
-    }
-
-    const state = getState();
-    const {currentUserId, profiles, statuses} = state.entities.users;
-
-    const needProfiles = [];
-    const needStatuses = [];
-
-    for (const userId of userIds) {
-        if (!profiles[userId] && userId !== currentUserId) {
-            needProfiles.push(userId);
-        }
-
-        if (statuses[userId] !== General.ONLINE) {
-            needStatuses.push(userId);
-        }
-    }
-
-    if (needProfiles.length > 0) {
-        getProfilesByIds(needProfiles)(dispatch, getState);
-    }
-
-    if (needStatuses.length > 0) {
-        getStatusesByIds(needStatuses)(dispatch, getState);
-    }
-}
-
-function handlePreferencesDeletedEvent(msg, dispatch, getState) {
-    const preferences = JSON.parse(msg.data.preferences);
-    dispatch({type: PreferenceTypes.DELETED_PREFERENCES, data: preferences}, getState);
-}
-
-function handleStatusChangedEvent(msg, dispatch, getState) {
-    dispatch({
+function handleStatusChangedEvent(msg) {
+    return {
         type: UserTypes.RECEIVED_STATUSES,
         data: [{user_id: msg.data.user_id, status: msg.data.status}],
-    }, getState);
+    };
 }
 
 function handleHelloEvent(msg) {
@@ -703,123 +669,160 @@ function handleHelloEvent(msg) {
     }
 }
 
-function handleUserTypingEvent(msg, dispatch, getState) {
-    const state = getState();
-    const {currentUserId, profiles, statuses} = state.entities.users;
-    const {config} = state.entities.general;
-    const userId = msg.data.user_id;
+function handleUserTypingEvent(msg) {
+    return (dispatch, getState) => {
+        const state = getState();
+        const profiles = getUsers(state);
+        const statuses = getUserStatuses(state);
+        const currentUserId = getCurrentUserId(state);
+        const config = getConfig(state);
+        const userId = msg.data.user_id;
 
-    const data = {
-        id: msg.broadcast.channel_id + msg.data.parent_id,
-        userId,
-        now: Date.now(),
-    };
+        const data = {
+            id: msg.broadcast.channel_id + msg.data.parent_id,
+            userId,
+            now: Date.now(),
+        };
 
-    dispatch({
-        type: WebsocketEvents.TYPING,
-        data,
-    }, getState);
-
-    setTimeout(() => {
         dispatch({
-            type: WebsocketEvents.STOP_TYPING,
+            type: WebsocketEvents.TYPING,
             data,
-        }, getState);
-    }, parseInt(config.TimeBetweenUserTypingUpdatesMilliseconds, 10));
+        });
 
-    if (!profiles[userId] && userId !== currentUserId) {
-        getProfilesByIds([userId])(dispatch, getState);
-    }
+        setTimeout(() => {
+            dispatch({
+                type: WebsocketEvents.STOP_TYPING,
+                data,
+            });
+        }, parseInt(config.TimeBetweenUserTypingUpdatesMilliseconds, 10));
 
-    const status = statuses[userId];
-    if (status !== General.ONLINE) {
-        getStatusesByIds([userId])(dispatch, getState);
-    }
+        if (!profiles[userId] && userId !== currentUserId) {
+            dispatch(getProfilesByIds([userId]));
+        }
+
+        const status = statuses[userId];
+        if (status !== General.ONLINE) {
+            dispatch(getStatusesByIds([userId]));
+        }
+    };
 }
 
-function handleReactionAddedEvent(msg, dispatch, getState) {
+function handleReactionAddedEvent(msg) {
+    return (dispatch) => {
+        const {data} = msg;
+        const reaction = JSON.parse(data.reaction);
+
+        dispatch(getCustomEmojiForReaction(reaction.emoji_name));
+
+        dispatch({
+            type: PostTypes.RECEIVED_REACTION,
+            data: reaction,
+        });
+    };
+}
+
+function handleReactionRemovedEvent(msg) {
     const {data} = msg;
     const reaction = JSON.parse(data.reaction);
 
-    dispatch(getCustomEmojiForReaction(reaction.emoji_name));
-
-    dispatch({
-        type: PostTypes.RECEIVED_REACTION,
-        data: reaction,
-    }, getState);
-}
-
-function handleReactionRemovedEvent(msg, dispatch, getState) {
-    const {data} = msg;
-    const reaction = JSON.parse(data.reaction);
-
-    dispatch({
+    return {
         type: PostTypes.REACTION_DELETED,
         data: reaction,
-    }, getState);
+    };
 }
 
-function handleAddEmoji(msg, dispatch) {
+function handleAddEmoji(msg) {
     const data = JSON.parse(msg.data.emoji);
 
-    dispatch({
+    return {
         type: EmojiTypes.RECEIVED_CUSTOM_EMOJI,
         data,
-    });
+    };
 }
 
-function handleLicenseChangedEvent(msg, dispatch) {
+function handleLicenseChangedEvent(msg) {
     const data = msg.data.license;
 
-    dispatch({
+    return {
         type: GeneralTypes.CLIENT_LICENSE_RECEIVED,
         data,
-    });
+    };
 }
 
-function handleConfigChangedEvent(msg, dispatch) {
+function handleConfigChangedEvent(msg) {
     const data = msg.data.config;
 
-    dispatch({
+    EventEmitter.emit(General.CONFIG_CHANGED, data);
+    return {
         type: GeneralTypes.CLIENT_CONFIG_RECEIVED,
         data,
-    });
-    EventEmitter.emit(General.CONFIG_CHANGED, data);
+    };
 }
 
-function handlePluginStatusesChangedEvent(msg, dispatch) {
+function handlePluginStatusesChangedEvent(msg) {
     const data = msg.data;
 
-    dispatch({
+    return {
         type: AdminTypes.RECEIVED_PLUGIN_STATUSES,
         data: data.plugin_statuses,
-    });
+    };
+}
+
+function handleOpenDialogEvent(msg) {
+    return (dispatch) => {
+        const data = (msg.data && msg.data.dialog) || {};
+        dispatch({type: IntegrationTypes.RECEIVED_DIALOG, data: JSON.parse(data)});
+    };
 }
 
 // Helpers
+function getAddedDmUsersIfNecessary(preferences) {
+    return (dispatch, getState) => {
+        const userIds = [];
 
-function loadPostsHelper(channelId, dispatch, getState) {
-    const {posts, postsInChannel} = getState().entities.posts;
-    const postsIds = postsInChannel[channelId];
+        for (const preference of preferences) {
+            if (preference.category === Preferences.CATEGORY_DIRECT_CHANNEL_SHOW && preference.value === 'true') {
+                userIds.push(preference.name);
+            }
+        }
 
-    let latestPostTime = 0;
-    if (postsIds && postsIds.length) {
-        const postsForChannel = postsIds.map((id) => posts[id]);
-        latestPostTime = getLastCreateAt(postsForChannel);
-    }
+        if (userIds.length === 0) {
+            return;
+        }
 
-    if (latestPostTime === 0) {
-        getPosts(channelId)(dispatch, getState);
-    } else {
-        getPostsSince(channelId, latestPostTime)(dispatch, getState);
-    }
+        const state = getState();
+        const profiles = getUsers(state);
+        const statuses = getUserStatuses(state);
+        const currentUserId = getCurrentUserId(state);
+
+        const needProfiles = [];
+        const needStatuses = [];
+
+        for (const userId of userIds) {
+            if (!profiles[userId] && userId !== currentUserId) {
+                needProfiles.push(userId);
+            }
+
+            if (statuses[userId] !== General.ONLINE) {
+                needStatuses.push(userId);
+            }
+        }
+
+        if (needProfiles.length > 0) {
+            dispatch(getProfilesByIds(needProfiles));
+        }
+
+        if (needStatuses.length > 0) {
+            dispatch(getStatusesByIds(needStatuses));
+        }
+    };
 }
 
 let lastTimeTypingSent = 0;
 export function userTyping(channelId, parentPostId) {
     return async (dispatch, getState) => {
         const state = getState();
-        const config = state.entities.general.config;
+        const config = getConfig(state);
         const t = Date.now();
         const stats = getCurrentChannelStats(state);
         const membersInChannel = stats ? stats.member_count : 0;

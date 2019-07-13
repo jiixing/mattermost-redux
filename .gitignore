@@ -42,3 +42,8 @@ mattermost-redux-*.tgz
 # flow
 /flow-typed
 /.flowinstall
+
+.vscode/
+
+# test coverage
+coverage

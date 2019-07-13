@@ -17,6 +17,9 @@ export default {
     SEARCH_TIMEOUT_MILLISECONDS: 100,
     STATUS_INTERVAL: 60000,
 
+    AUTOCOMPLETE_LIMIT_DEFAULT: 25,
+    AUTOCOMPLETE_SPLIT_CHARACTERS: ['.', '-', '_'],
+
     MENTION: 'mention',
 
     OUT_OF_OFFICE: 'ooo',
@@ -50,6 +53,7 @@ export default {
     RESTRICT_DIRECT_MESSAGE_ANY: 'any',
     RESTRICT_DIRECT_MESSAGE_TEAM: 'team',
 
+    SWITCH_TO_DEFAULT_CHANNEL: 'switch_to_default_channel',
     DEFAULT_CHANNEL: 'town-square',
     DM_CHANNEL: 'D',
     OPEN_CHANNEL: 'O',
@@ -77,8 +81,13 @@ export default {
 
     MAX_USERS_IN_GM: 8,
     MIN_USERS_IN_GM: 3,
+    MAX_GROUP_CHANNELS_FOR_PROFILES: 50,
 
     DEFAULT_LOCALE: 'en',
 
     DEFAULT_AUTOLINKED_URL_SCHEMES: ['http', 'https', 'ftp', 'mailto', 'tel'],
+
+    DISABLED: 'disabled',
+    DEFAULT_ON: 'default_on',
+    DEFAULT_OFF: 'default_off',
 };

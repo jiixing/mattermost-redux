@@ -3,8 +3,10 @@
 // @flow
 
 import {General, Preferences} from 'constants';
-import type {UserProfile} from 'types/users';
 import {localizeMessage} from 'utils/i18n_utils';
+
+import type {UserProfile} from 'types/users';
+import type {IDMappedObjects, $ID} from 'types/utilities';
 
 export function getFullName(user: UserProfile): string {
     if (user.first_name && user.last_name) {
@@ -21,9 +23,9 @@ export function getFullName(user: UserProfile): string {
 export function displayUsername(
     user: UserProfile,
     teammateNameDisplay: string,
-    usernameWithPrefix: boolean,
+    useFallbackUsername: boolean = true,
 ): string {
-    let name = localizeMessage('channel_loader.someone', 'Someone');
+    let name = useFallbackUsername ? localizeMessage('channel_loader.someone', 'Someone') : '';
 
     if (user) {
         if (teammateNameDisplay === Preferences.DISPLAY_PREFER_NICKNAME) {
@@ -31,11 +33,11 @@ export function displayUsername(
         } else if (teammateNameDisplay === Preferences.DISPLAY_PREFER_FULL_NAME) {
             name = getFullName(user);
         } else {
-            name = usernameWithPrefix ? `@${user.username}` : user.username;
+            name = user.username;
         }
 
         if (!name || name.trim().length === 0) {
-            name = usernameWithPrefix ? `@${user.username}` : user.username;
+            name = user.username;
         }
     }
 
@@ -75,7 +77,7 @@ export function hasPostAllPublicRole(roles: string): boolean {
     return rolesIncludePermission(roles, General.SYSTEM_POST_ALL_PUBLIC_ROLE);
 }
 
-export function profileListToMap(profileList: Array<UserProfile>): {[string]: UserProfile} {
+export function profileListToMap(profileList: Array<UserProfile>): IDMappedObjects<UserProfile> {
     const profiles = {};
     for (let i = 0; i < profileList.length; i++) {
         profiles[profileList[i].id] = profileList[i];
@@ -83,7 +85,7 @@ export function profileListToMap(profileList: Array<UserProfile>): {[string]: Us
     return profiles;
 }
 
-export function removeUserFromList(userId: string, list: Array<UserProfile>): Array<UserProfile> {
+export function removeUserFromList(userId: $ID<UserProfile>, list: Array<UserProfile>): Array<UserProfile> {
     for (let i = list.length - 1; i >= 0; i--) {
         if (list[i].id === userId) {
             list.splice(i, 1);
@@ -94,35 +96,73 @@ export function removeUserFromList(userId: string, list: Array<UserProfile>): Ar
     return list;
 }
 
+// Splits the term by a splitStr and composes a list of the parts of
+// the split concatenated with the rest, forming a set of suggesitons
+// matchable with startsWith
+//
+// E.g.: for "one.two.three" by "." it would yield
+// ["one.two.three", ".two.three", "two.three", ".three", "three"]
+export function getSuggestionsSplitBy(term: string, splitStr: string): Array<string> {
+    const splitTerm = term.split(splitStr);
+    const initialSuggestions = splitTerm.map((st, i) => splitTerm.slice(i).join(splitStr));
+
+    let suggestions = [];
+    if (splitStr === ' ') {
+        suggestions = initialSuggestions;
+    } else {
+        suggestions = initialSuggestions.reduce((acc, val) => {
+            if (acc.length === 0) {
+                acc.push(val);
+            } else {
+                acc.push(splitStr + val, val);
+            }
+            return acc;
+        }, []);
+    }
+    return suggestions;
+}
+
+export function getSuggestionsSplitByMultiple(term: string, splitStrs: Array<string>): Array<string> {
+    const suggestions = splitStrs.reduce((acc, val) => {
+        getSuggestionsSplitBy(term, val).forEach((suggestion) => acc.add(suggestion));
+        return acc;
+    }, new Set());
+
+    return [...suggestions];
+}
+
 export function filterProfilesMatchingTerm(users: Array<UserProfile>, term: string): Array<UserProfile> {
     const lowercasedTerm = term.toLowerCase();
+    let trimmedTerm = lowercasedTerm;
+    if (trimmedTerm.startsWith('@')) {
+        trimmedTerm = trimmedTerm.substr(1);
+    }
 
     return users.filter((user: UserProfile) => {
         if (!user) {
             return false;
         }
-        const username = (user.username || '').toLowerCase();
+
+        const profileSuggestions = [];
+        const usernameSuggestions = getSuggestionsSplitByMultiple((user.username || '').toLowerCase(), General.AUTOCOMPLETE_SPLIT_CHARACTERS);
+        profileSuggestions.push(...usernameSuggestions);
         const first = (user.first_name || '').toLowerCase();
         const last = (user.last_name || '').toLowerCase();
         const full = first + ' ' + last;
+        profileSuggestions.push(first, last, full);
+        profileSuggestions.push((user.nickname || '').toLowerCase());
         const email = (user.email || '').toLowerCase();
-        const nickname = (user.nickname || '').toLowerCase();
+        profileSuggestions.push(email);
+        profileSuggestions.push((user.nickname || '').toLowerCase());
 
-        let emailPrefix = '';
-        let emailDomain = '';
         const split = email.split('@');
-        emailPrefix = split[0];
         if (split.length > 1) {
-            emailDomain = split[1];
+            profileSuggestions.push(split[1]);
         }
 
-        return username.startsWith(lowercasedTerm) ||
-            first.startsWith(lowercasedTerm) ||
-            last.startsWith(lowercasedTerm) ||
-            full.startsWith(lowercasedTerm) ||
-            nickname.startsWith(term) ||
-            emailPrefix.startsWith(term) ||
-            emailDomain.startsWith(term);
+        return profileSuggestions.
+            filter((suggestion) => suggestion !== '').
+            some((suggestion) => suggestion.startsWith(trimmedTerm));
     });
 }
 

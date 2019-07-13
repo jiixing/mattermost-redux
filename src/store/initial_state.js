@@ -35,6 +35,8 @@ const state: GlobalState = {
             myMembers: {},
             membersInTeam: {},
             stats: {},
+            groupsAssociatedToTeam: {},
+            totalCount: 0,
         },
         channels: {
             currentChannelId: '',
@@ -43,11 +45,17 @@ const state: GlobalState = {
             myMembers: {},
             membersInChannel: {},
             stats: {},
+            groupsAssociatedToChannel: {},
+            totalCount: 0,
         },
         posts: {
+            expandedURLs: {},
             posts: {},
             postsInChannel: {},
             postsInThread: {},
+            pendingPostIds: [],
+            reactions: {},
+            openGraph: {},
             selectedPostId: '',
             currentFocusedPostId: '',
             messagesHistory: {
@@ -67,6 +75,8 @@ const state: GlobalState = {
             config: {},
             environmentConfig: {},
             complianceReports: {},
+            ldapGroups: {},
+            ldapGroupsCount: 0,
         },
         jobs: {
             jobs: {},
@@ -93,6 +103,7 @@ const state: GlobalState = {
         search: {
             results: [],
             recent: {},
+            matches: {},
         },
         typing: {},
         roles: {
@@ -117,23 +128,20 @@ const state: GlobalState = {
             },
         },
         schemes: {schemes: {}},
+        groups: {
+            groups: {},
+            syncables: {},
+            members: {},
+        },
     },
     errors: [],
     requests: {
         channels: {
-            getChannel: {
+            getAllChannels: {
                 status: 'not_started',
                 error: null,
             },
             getChannels: {
-                status: 'not_started',
-                error: null,
-            },
-            myMembers: {
-                status: 'not_started',
-                error: null,
-            },
-            members: {
                 status: 'not_started',
                 error: null,
             },
@@ -146,46 +154,6 @@ const state: GlobalState = {
                 error: null,
             },
             updateChannel: {
-                status: 'not_started',
-                error: null,
-            },
-            updateChannelNotifyProps: {
-                status: 'not_started',
-                error: null,
-            },
-            joinChannel: {
-                status: 'not_started',
-                error: null,
-            },
-            deleteChannel: {
-                status: 'not_started',
-                error: null,
-            },
-            updateLastViewedAt: {
-                status: 'not_started',
-                error: null,
-            },
-            getChannelStats: {
-                status: 'not_started',
-                error: null,
-            },
-            addChannelMember: {
-                status: 'not_started',
-                error: null,
-            },
-            removeChannelMember: {
-                status: 'not_started',
-                error: null,
-            },
-            updateChannelMember: {
-                status: 'not_started',
-                error: null,
-            },
-            updateChannelScheme: {
-                status: 'not_started',
-                error: null,
-            },
-            updateChannelMemberSchemeRoles: {
                 status: 'not_started',
                 error: null,
             },
@@ -211,6 +179,10 @@ const state: GlobalState = {
                 status: 'not_started',
                 error: null,
             },
+            redirectLocation: {
+                status: 'not_started',
+                error: null,
+            },
         },
         posts: {
             createPost: {
@@ -221,35 +193,10 @@ const state: GlobalState = {
                 status: 'not_started',
                 error: null,
             },
-            deletePost: {
-                status: 'not_started',
-                error: null,
-            },
             getPostThread: {
                 status: 'not_started',
                 error: null,
             },
-            getPostThreadRetryAttempts: 0,
-            getPosts: {
-                status: 'not_started',
-                error: null,
-            },
-            getPostsRetryAttempts: 0,
-            getPostsSince: {
-                status: 'not_started',
-                error: null,
-            },
-            getPostsSinceRetryAttempts: 0,
-            getPostsBefore: {
-                status: 'not_started',
-                error: null,
-            },
-            getPostsBeforeRetryAttempts: 0,
-            getPostsAfter: {
-                status: 'not_started',
-                error: null,
-            },
-            getPostsAfterRetryAttempts: 0,
         },
         teams: {
             getMyTeams: {
@@ -260,35 +207,7 @@ const state: GlobalState = {
                 status: 'not_started',
                 error: null,
             },
-            createTeam: {
-                status: 'not_started',
-                error: null,
-            },
-            updateTeam: {
-                status: 'not_started',
-                error: null,
-            },
-            getMyTeamMembers: {
-                status: 'not_started',
-                error: null,
-            },
-            getTeamMembers: {
-                status: 'not_started',
-                error: null,
-            },
-            getTeamStats: {
-                status: 'not_started',
-                error: null,
-            },
-            addUserToTeam: {
-                status: 'not_started',
-                error: null,
-            },
-            removeUserFromTeam: {
-                status: 'not_started',
-                error: null,
-            },
-            updateTeamScheme: {
+            joinTeam: {
                 status: 'not_started',
                 error: null,
             },
@@ -306,63 +225,11 @@ const state: GlobalState = {
                 status: 'not_started',
                 error: null,
             },
-            create: {
-                status: 'not_started',
-                error: null,
-            },
-            getProfiles: {
-                status: 'not_started',
-                error: null,
-            },
-            getProfilesInTeam: {
-                status: 'not_started',
-                error: null,
-            },
-            getProfilesInChannel: {
-                status: 'not_started',
-                error: null,
-            },
-            getProfilesNotInChannel: {
-                status: 'not_started',
-                error: null,
-            },
-            getUser: {
-                status: 'not_started',
-                error: null,
-            },
-            getUserByUsername: {
-                status: 'not_started',
-                error: null,
-            },
-            getStatusesByIds: {
-                status: 'not_started',
-                error: null,
-            },
-            getSessions: {
-                status: 'not_started',
-                error: null,
-            },
-            revokeSession: {
-                status: 'not_started',
-                error: null,
-            },
-            getAudits: {
-                status: 'not_started',
-                error: null,
-            },
             autocompleteUsers: {
                 status: 'not_started',
                 error: null,
             },
-            searchProfiles: {
-                status: 'not_started',
-                error: null,
-            },
             updateMe: {
-                status: 'not_started',
-                error: null,
-            },
-            getTotalUsersStats: {
                 status: 'not_started',
                 error: null,
             },
@@ -426,31 +293,121 @@ const state: GlobalState = {
                 status: 'not_started',
                 error: null,
             },
-        },
-        emojis: {
-            createCustomEmoji: {
+            deleteBrandImage: {
                 status: 'not_started',
                 error: null,
             },
-            getCustomEmojis: {
+            disablePlugin: {
                 status: 'not_started',
                 error: null,
             },
-            deleteCustomEmoji: {
+            enablePlugin: {
+                status: 'not_started',
+                error: null,
+            },
+            getAnalytics: {
+                status: 'not_started',
+                error: null,
+            },
+            getClusterStatus: {
+                status: 'not_started',
+                error: null,
+            },
+            getEnvironmentConfig: {
+                status: 'not_started',
+                error: null,
+            },
+            getPluginStatuses: {
+                status: 'not_started',
+                error: null,
+            },
+            getPlugins: {
+                status: 'not_started',
+                error: null,
+            },
+            getSamlCertificateStatus: {
+                status: 'not_started',
+                error: null,
+            },
+            installPluginFromUrl: {
+                status: 'not_started',
+                error: null,
+            },
+            purgeElasticsearchIndexes: {
+                status: 'not_started',
+                error: null,
+            },
+            removeIdpSamlCertificate: {
+                status: 'not_started',
+                error: null,
+            },
+            removeLicense: {
+                status: 'not_started',
+                error: null,
+            },
+            removePlugin: {
+                status: 'not_started',
+                error: null,
+            },
+            removePrivateSamlCertificate: {
+                status: 'not_started',
+                error: null,
+            },
+            removePublicSamlCertificate: {
+                status: 'not_started',
+                error: null,
+            },
+            syncLdap: {
+                status: 'not_started',
+                error: null,
+            },
+            testElasticsearch: {
+                status: 'not_started',
+                error: null,
+            },
+            testLdap: {
+                status: 'not_started',
+                error: null,
+            },
+            uploadBrandImage: {
+                status: 'not_started',
+                error: null,
+            },
+            uploadIdpSamlCertificate: {
+                status: 'not_started',
+                error: null,
+            },
+            uploadLicense: {
+                status: 'not_started',
+                error: null,
+            },
+            uploadPlugin: {
+                status: 'not_started',
+                error: null,
+            },
+            uploadPrivateSamlCertificate: {
+                status: 'not_started',
+                error: null,
+            },
+            uploadPublicSamlCertificate: {
+                status: 'not_started',
+                error: null,
+            },
+            getLdapGroups: {
+                status: 'not_started',
+                error: null,
+            },
+            unlinkLdapGroup: {
+                status: 'not_started',
+                error: null,
+            },
+            linkLdapGroup: {
                 status: 'not_started',
                 error: null,
             },
         },
         files: {
-            getFilesForPost: {
-                status: 'not_started',
-                error: null,
-            },
             uploadFiles: {
-                status: 'not_started',
-                error: null,
-            },
-            getFilePublicLink: {
                 status: 'not_started',
                 error: null,
             },
@@ -536,6 +493,14 @@ const state: GlobalState = {
                 status: 'not_started',
                 error: null,
             },
+            executeCommand: {
+                status: 'not_started',
+                error: null,
+            },
+            submitInteractiveDialog: {
+                status: 'not_started',
+                error: null,
+            },
         },
         roles: {
             getRolesByNames: {
@@ -585,6 +550,93 @@ const state: GlobalState = {
                 error: null,
             },
         },
+        jobs: {
+            createJob: {
+                status: 'not_started',
+                error: null,
+            },
+            getJob: {
+                status: 'not_started',
+                error: null,
+            },
+            getJobs: {
+                status: 'not_started',
+                error: null,
+            },
+            cancelJob: {
+                status: 'not_started',
+                error: null,
+            },
+        },
+        search: {
+            flaggedPosts: {
+                status: 'not_started',
+                error: null,
+            },
+            pinnedPosts: {
+                status: 'not_started',
+                error: null,
+            },
+            recentMentions: {
+                status: 'not_started',
+                error: null,
+            },
+            searchPosts: {
+                status: 'not_started',
+                error: null,
+            },
+        },
+        groups: {
+            linkGroupSyncable: {
+                status: 'not_started',
+                error: null,
+            },
+            unlinkGroupSyncable: {
+                status: 'not_started',
+                error: null,
+            },
+            getGroupSyncables: {
+                status: 'not_started',
+                error: null,
+            },
+            getGroupMembers: {
+                status: 'not_started',
+                error: null,
+            },
+            getGroup: {
+                status: 'not_started',
+                error: null,
+            },
+            getAllGroupsAssociatedToTeam: {
+                status: 'not_started',
+                error: null,
+            },
+            getAllGroupsAssociatedToChannel: {
+                status: 'not_started',
+                error: null,
+            },
+            getGroupsAssociatedToTeam: {
+                status: 'not_started',
+                error: null,
+            },
+            getGroupsAssociatedToChannel: {
+                status: 'not_started',
+                error: null,
+            },
+            getGroupsNotAssociatedToTeam: {
+                status: 'not_started',
+                error: null,
+            },
+            getGroupsNotAssociatedToChannel: {
+                status: 'not_started',
+                error: null,
+            },
+        },
+    },
+    websocket: {
+        connected: false,
+        lastConnectAt: 0,
+        lastDisconnectAt: 0,
     },
 };
 

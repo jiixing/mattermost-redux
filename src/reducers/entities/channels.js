@@ -2,7 +2,7 @@
 // See LICENSE.txt for license information.
 
 import {combineReducers} from 'redux';
-import {ChannelTypes, UserTypes, SchemeTypes} from 'action_types';
+import {ChannelTypes, UserTypes, SchemeTypes, GroupTypes} from 'action_types';
 import {General} from 'constants';
 
 function channelListToSet(state, action) {
@@ -37,29 +37,50 @@ function currentChannelId(state = '', action) {
     }
 }
 
-function channels(state = {}, action) {
+export function channels(state = {}, action) {
     switch (action.type) {
     case ChannelTypes.RECEIVED_CHANNEL:
+        if (state[action.data.id] && action.data.type === General.DM_CHANNEL) {
+            action.data.display_name = action.data.display_name || state[action.data.id].display_name;
+        }
         return {
             ...state,
             [action.data.id]: action.data,
         };
-
     case ChannelTypes.RECEIVED_CHANNELS:
+    case ChannelTypes.RECEIVED_ALL_CHANNELS:
     case SchemeTypes.RECEIVED_SCHEME_CHANNELS: {
         const nextState = {...state};
         for (const channel of action.data) {
+            if (state[channel.id] && channel.type === General.DM_CHANNEL) {
+                channel.display_name = channel.display_name || state[channel.id].display_name;
+            }
             nextState[channel.id] = channel;
         }
         return nextState;
     }
     case ChannelTypes.RECEIVED_CHANNEL_DELETED: {
-        const nextState = {...state};
-        Reflect.deleteProperty(nextState, action.data.id);
-        return nextState;
+        const {id, deleteAt} = action.data;
+
+        if (!state[id]) {
+            return state;
+        }
+
+        return {
+            ...state,
+            [id]: {
+                ...state[id],
+                delete_at: deleteAt,
+            },
+        };
     }
     case ChannelTypes.UPDATE_CHANNEL_HEADER: {
         const {channelId, header} = action.data;
+
+        if (!state[channelId]) {
+            return state;
+        }
+
         return {
             ...state,
             [channelId]: {
@@ -70,6 +91,11 @@ function channels(state = {}, action) {
     }
     case ChannelTypes.UPDATE_CHANNEL_PURPOSE: {
         const {channelId, purpose} = action.data;
+
+        if (!state[channelId]) {
+            return state;
+        }
+
         return {
             ...state,
             [channelId]: {
@@ -133,8 +159,6 @@ function channelsInTeam(state = {}, action) {
     case ChannelTypes.RECEIVED_CHANNELS: {
         return channelListToSet(state, action);
     }
-    case ChannelTypes.RECEIVED_CHANNEL_DELETED:
-        return removeChannelFromSet(state, action);
     case ChannelTypes.LEAVE_CHANNEL: {
         if (action.data && action.data.type === General.PRIVATE_CHANNEL) {
             return removeChannelFromSet(state, action);
@@ -268,8 +292,7 @@ function myMembers(state = {}, action) {
             [action.data.channel_id]: member,
         };
     }
-    case ChannelTypes.LEAVE_CHANNEL:
-    case ChannelTypes.RECEIVED_CHANNEL_DELETED: {
+    case ChannelTypes.LEAVE_CHANNEL: {
         const nextState = {...state};
         if (action.data) {
             Reflect.deleteProperty(nextState, action.data.id);
@@ -399,6 +422,44 @@ function stats(state = {}, action) {
     }
 }
 
+function groupsAssociatedToChannel(state = {}, action) {
+    switch (action.type) {
+    case GroupTypes.RECEIVED_GROUPS_ASSOCIATED_TO_CHANNEL: {
+        const {channelID, groups, totalGroupCount} = action.data;
+        const nextState = {...state};
+        const associatedGroupIDs = new Set(state[channelID] ? state[channelID].ids : []);
+        for (const group of groups) {
+            associatedGroupIDs.add(group.id);
+        }
+        nextState[channelID] = {ids: Array.from(associatedGroupIDs), totalCount: totalGroupCount};
+        return nextState;
+    }
+    case GroupTypes.RECEIVED_ALL_GROUPS_ASSOCIATED_TO_CHANNEL: {
+        const {channelID, groups} = action.data;
+        const nextState = {...state};
+        const associatedGroupIDs = new Set([]);
+        for (const group of groups) {
+            associatedGroupIDs.add(group.id);
+        }
+        const ids = Array.from(associatedGroupIDs);
+        nextState[channelID] = {ids, totalCount: ids.length};
+        return nextState;
+    }
+    case GroupTypes.RECEIVED_GROUPS_NOT_ASSOCIATED_TO_CHANNEL: {
+        const {channelID, groups} = action.data;
+        const nextState = {...state};
+        const associatedGroupIDs = new Set(state[channelID] ? state[channelID].ids : []);
+        for (const group of groups) {
+            associatedGroupIDs.delete(group.id);
+        }
+        nextState[channelID] = Array.from(associatedGroupIDs);
+        return nextState;
+    }
+    default:
+        return state;
+    }
+}
+
 function updateChannelMemberSchemeRoles(state, action) {
     const {channelId, userId, isSchemeUser, isSchemeAdmin} = action.data;
     const channel = state[channelId];
@@ -421,6 +482,16 @@ function updateChannelMemberSchemeRoles(state, action) {
     return state;
 }
 
+function totalCount(state = 0, action) {
+    switch (action.type) {
+    case ChannelTypes.RECEIVED_TOTAL_CHANNEL_COUNT: {
+        return action.data;
+    }
+    default:
+        return state;
+    }
+}
+
 export default combineReducers({
 
     // the current selected channel
@@ -440,4 +511,8 @@ export default combineReducers({
 
     // object where every key is the channel id and has an object with the channel stats
     stats,
+
+    groupsAssociatedToChannel,
+
+    totalCount,
 });

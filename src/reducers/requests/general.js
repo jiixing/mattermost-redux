@@ -7,8 +7,8 @@ import {GeneralTypes} from 'action_types';
 
 import {handleRequest, initialRequestState} from './helpers';
 
-import type {GenericAction} from '../../types/actions';
-import type {RequestStatusType} from '../../types/requests';
+import type {GenericAction} from 'types/actions';
+import type {GeneralRequestsStatuses, RequestStatusType} from 'types/requests';
 
 function server(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
     if (action.type === GeneralTypes.PING_RESET) {
@@ -68,10 +68,21 @@ function websocket(state: RequestStatusType = initialRequestState(), action: Gen
     );
 }
 
-export default combineReducers({
+function redirectLocation(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+    return handleRequest(
+        GeneralTypes.REDIRECT_LOCATION_REQUEST,
+        GeneralTypes.REDIRECT_LOCATION_SUCCESS,
+        GeneralTypes.REDIRECT_LOCATION_FAILURE,
+        state,
+        action
+    );
+}
+
+export default (combineReducers({
     server,
     config,
     dataRetentionPolicy,
     license,
     websocket,
-});
+    redirectLocation,
+}): (GeneralRequestsStatuses, GenericAction) => GeneralRequestsStatuses);

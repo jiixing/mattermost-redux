@@ -1,24 +1,27 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import EventEmitter from 'utils/event_emitter';
-import {General} from 'constants';
+import {isSystemAdmin} from '../utils/user_utils';
 
 const FormData = require('form-data');
 
 import fetch from './fetch_etag';
-import {isMinimumServerVersion} from 'src/utils/helpers';
+import {buildQueryString, isMinimumServerVersion} from 'src/utils/helpers';
+import {cleanUrlForLogging} from 'src/utils/sentry';
+import {General} from 'constants';
 
-const HEADER_TOKEN = 'Token';
 const HEADER_AUTH = 'Authorization';
 const HEADER_BEARER = 'BEARER';
 const HEADER_REQUESTED_WITH = 'X-Requested-With';
 const HEADER_USER_AGENT = 'User-Agent';
-const HEADER_X_VERSION_ID = 'X-Version-Id';
 const HEADER_X_CLUSTER_ID = 'X-Cluster-Id';
+const HEADER_X_CSRF_TOKEN = 'X-CSRF-Token';
+export const HEADER_X_VERSION_ID = 'X-Version-Id';
 
 const PER_PAGE_DEFAULT = 60;
 const LOGS_PER_PAGE_DEFAULT = 10000;
+
+/* eslint-disable no-throw-literal */
 
 export default class Client4 {
     constructor() {
@@ -26,6 +29,7 @@ export default class Client4 {
         this.serverVersion = '';
         this.clusterId = '';
         this.token = '';
+        this.csrf = '';
         this.url = '';
         this.urlVersion = '/api/v4';
         this.userAgent = null;
@@ -34,7 +38,6 @@ export default class Client4 {
         this.userId = '';
         this.diagnosticId = '';
         this.includeCookies = true;
-        this.online = true;
 
         this.translations = {
             connectionError: 'There appears to be a problem with your internet connection.',
@@ -46,12 +49,15 @@ export default class Client4 {
         return this.url;
     }
 
-    setUrl(url) {
-        this.url = url;
+    getAbsoluteUrl(baseUrl) {
+        if (typeof baseUrl !== 'string' || !baseUrl.startsWith('/')) {
+            return baseUrl;
+        }
+        return this.getUrl() + baseUrl;
     }
 
-    setOnline(online) {
-        this.online = online;
+    setUrl(url) {
+        this.url = url;
     }
 
     setUserAgent(userAgent) {
@@ -64,6 +70,10 @@ export default class Client4 {
 
     setToken(token) {
         this.token = token;
+    }
+
+    setCSRF(csrfToken) {
+        this.csrf = csrfToken;
     }
 
     setAcceptLanguage(locale) {
@@ -80,6 +90,10 @@ export default class Client4 {
 
     setUserId(userId) {
         this.userId = userId;
+    }
+
+    setUserRoles(roles) {
+        this.userRoles = roles;
     }
 
     setDiagnosticId(diagnosticId) {
@@ -250,6 +264,31 @@ export default class Client4 {
         return `${this.getBaseRoute()}/schemes`;
     }
 
+    getRedirectLocationRoute() {
+        return `${this.getBaseRoute()}/redirect_location`;
+    }
+
+    getBotsRoute() {
+        return `${this.getBaseRoute()}/bots`;
+    }
+
+    getBotRoute(botUserId) {
+        return `${this.getBotsRoute()}/${botUserId}`;
+    }
+
+    getCSRFFromCookie() {
+        if (typeof document !== 'undefined' && typeof document.cookie !== 'undefined') {
+            const cookies = document.cookie.split(';');
+            for (let i = 0; i < cookies.length; i++) {
+                const cookie = cookies[i].trim();
+                if (cookie.startsWith('MMCSRF=')) {
+                    return cookie.replace('MMCSRF=', '');
+                }
+            }
+        }
+        return '';
+    }
+
     getOptions(options) {
         const newOptions = Object.assign({}, options);
 
@@ -260,6 +299,11 @@ export default class Client4 {
 
         if (this.token) {
             headers[HEADER_AUTH] = `${HEADER_BEARER} ${this.token}`;
+        }
+
+        const csrfToken = this.csrf || this.getCSRFFromCookie();
+        if (options.method && options.method.toLowerCase() !== 'get' && csrfToken) {
+            headers[HEADER_X_CSRF_TOKEN] = csrfToken;
         }
 
         if (this.includeCookies) {
@@ -406,10 +450,40 @@ export default class Client4 {
         );
     };
 
+    setDefaultProfileImage = async (userId) => {
+        this.trackEvent('api', 'api_users_set_default_profile_picture');
+
+        return this.doFetch(
+            `${this.getUserRoute(userId)}/image`,
+            {method: 'delete'}
+        );
+    };
+
     verifyUserEmail = async (token) => {
         return this.doFetch(
             `${this.getUsersRoute()}/email/verify`,
             {method: 'post', body: JSON.stringify({token})}
+        );
+    }
+
+    updateMyTermsOfServiceStatus = async (termsOfServiceId, accepted) => {
+        return this.doFetch(
+            `${this.getUserRoute('me')}/terms_of_service`,
+            {method: 'post', body: JSON.stringify({termsOfServiceId, accepted})}
+        );
+    }
+
+    getTermsOfService = async () => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/terms_of_service`,
+            {method: 'get'}
+        );
+    }
+
+    createTermsOfService = async (text) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/terms_of_service`,
+            {method: 'post', body: JSON.stringify({text})}
         );
     }
 
@@ -438,14 +512,10 @@ export default class Client4 {
             body.ldap_only = 'true';
         }
 
-        const {headers, data} = await this.doFetchWithResponse(
+        const {data} = await this.doFetchWithResponse(
             `${this.getUsersRoute()}/login`,
             {method: 'post', body: JSON.stringify(body)}
         );
-
-        if (headers.has(HEADER_TOKEN)) {
-            this.token = headers.get(HEADER_TOKEN);
-        }
 
         return data;
     };
@@ -460,14 +530,10 @@ export default class Client4 {
             token,
         };
 
-        const {headers, data} = await this.doFetchWithResponse(
+        const {data} = await this.doFetchWithResponse(
             `${this.getUsersRoute()}/login`,
             {method: 'post', body: JSON.stringify(body)}
         );
-
-        if (headers.has(HEADER_TOKEN)) {
-            this.token = headers.get(HEADER_TOKEN);
-        }
 
         return data;
     };
@@ -489,20 +555,20 @@ export default class Client4 {
         return response;
     };
 
-    getProfiles = async (page = 0, perPage = PER_PAGE_DEFAULT) => {
+    getProfiles = async (page = 0, perPage = PER_PAGE_DEFAULT, options = {}) => {
         this.trackEvent('api', 'api_profiles_get');
 
         return this.doFetch(
-            `${this.getUsersRoute()}${buildQueryString({page, per_page: perPage})}`,
+            `${this.getUsersRoute()}${buildQueryString({page, per_page: perPage, ...options})}`,
             {method: 'get'}
         );
     };
 
-    getProfilesByIds = async (userIds) => {
+    getProfilesByIds = async (userIds, options = {}) => {
         this.trackEvent('api', 'api_profiles_get_by_ids');
 
         return this.doFetch(
-            `${this.getUsersRoute()}/ids`,
+            `${this.getUsersRoute()}/ids${buildQueryString(options)}`,
             {method: 'post', body: JSON.stringify(userIds)}
         );
     };
@@ -525,11 +591,16 @@ export default class Client4 {
         );
     };
 
-    getProfilesNotInTeam = async (teamId, page = 0, perPage = PER_PAGE_DEFAULT) => {
-        this.trackEvent('api', 'api_profiles_get_not_in_team', {team_id: teamId});
+    getProfilesNotInTeam = async (teamId, groupConstrained, page = 0, perPage = PER_PAGE_DEFAULT) => {
+        this.trackEvent('api', 'api_profiles_get_not_in_team', {team_id: teamId, group_constrained: groupConstrained});
+
+        const queryStringObj = {not_in_team: teamId, page, per_page: perPage};
+        if (groupConstrained) {
+            queryStringObj.group_constrained = true;
+        }
 
         return this.doFetch(
-            `${this.getUsersRoute()}${buildQueryString({not_in_team: teamId, page, per_page: perPage})}`,
+            `${this.getUsersRoute()}${buildQueryString(queryStringObj)}`,
             {method: 'get'}
         );
     };
@@ -559,11 +630,25 @@ export default class Client4 {
         );
     };
 
-    getProfilesNotInChannel = async (teamId, channelId, page = 0, perPage = PER_PAGE_DEFAULT) => {
-        this.trackEvent('api', 'api_profiles_get_not_in_channel', {team_id: teamId, channel_id: channelId});
+    getProfilesInGroupChannels = async (channelsIds) => {
+        this.trackEvent('api', 'api_profiles_get_in_group_channels', {channelsIds});
 
         return this.doFetch(
-            `${this.getUsersRoute()}${buildQueryString({in_team: teamId, not_in_channel: channelId, page, per_page: perPage})}`,
+            `${this.getUsersRoute()}/group_channels`,
+            {method: 'post', body: JSON.stringify(channelsIds)}
+        );
+    };
+
+    getProfilesNotInChannel = async (teamId, channelId, groupConstrained, page = 0, perPage = PER_PAGE_DEFAULT) => {
+        this.trackEvent('api', 'api_profiles_get_not_in_channel', {team_id: teamId, channel_id: channelId, group_constrained: groupConstrained});
+
+        const queryStringObj = {in_team: teamId, not_in_channel: channelId, page, per_page: perPage};
+        if (groupConstrained) {
+            queryStringObj.group_constrained = true;
+        }
+
+        return this.doFetch(
+            `${this.getUsersRoute()}${buildQueryString(queryStringObj)}`,
             {method: 'get'}
         );
     };
@@ -605,9 +690,13 @@ export default class Client4 {
         return `${this.getUserRoute(userId)}/image${buildQueryString(params)}`;
     };
 
-    autocompleteUsers = async (name, teamId, channelId) => {
+    getDefaultProfilePictureUrl = (userId) => {
+        return `${this.getUserRoute(userId)}/image/default`;
+    };
+
+    autocompleteUsers = async (name, teamId, channelId, options = {limit: General.AUTOCOMPLETE_LIMIT_DEFAULT}) => {
         return this.doFetch(
-            `${this.getUsersRoute()}/autocomplete${buildQueryString({in_team: teamId, in_channel: channelId, name})}`,
+            `${this.getUsersRoute()}/autocomplete${buildQueryString({in_team: teamId, in_channel: channelId, name, limit: options.limit})}`,
             {method: 'get'}
         );
     };
@@ -617,11 +706,6 @@ export default class Client4 {
             `${this.getUserRoute(userId)}/sessions`,
             {method: 'get'}
         );
-    };
-
-    getCurrentSession = async (userId, token) => {
-        const sessions = await this.getSessions(userId);
-        return sessions.find((s) => s.token === token);
     };
 
     revokeSession = async (userId, sessionId) => {
@@ -634,6 +718,13 @@ export default class Client4 {
     revokeAllSessionsForUser = async (userId) => {
         return this.doFetch(
             `${this.getUserRoute(userId)}/sessions/revoke/all`,
+            {method: 'post'}
+        );
+    };
+
+    revokeSessionsForAllUsers = async () => {
+        return this.doFetch(
+            `${this.getUsersRoute()}/sessions/revoke/all`,
             {method: 'post'}
         );
     };
@@ -835,6 +926,24 @@ export default class Client4 {
         );
     };
 
+    patchTeam = async (team) => {
+        this.trackEvent('api', 'api_teams_patch_name', {team_id: team.id});
+
+        return this.doFetch(
+            `${this.getTeamRoute(team.id)}/patch`,
+            {method: 'put', body: JSON.stringify(team)}
+        );
+    };
+
+    regenerateTeamInviteId = async (teamId) => {
+        this.trackEvent('api', 'api_teams_regenerate_invite_id', {team_id: teamId});
+
+        return this.doFetch(
+            `${this.getTeamRoute(teamId)}/regenerate_invite_id`,
+            {method: 'post'}
+        );
+    };
+
     updateTeamScheme = async (teamId, schemeId) => {
         const patch = {scheme_id: schemeId};
 
@@ -853,9 +962,9 @@ export default class Client4 {
         );
     };
 
-    getTeams = async (page = 0, perPage = PER_PAGE_DEFAULT) => {
+    getTeams = async (page = 0, perPage = PER_PAGE_DEFAULT, includeTotalCount = false) => {
         return this.doFetch(
-            `${this.getTeamsRoute()}${buildQueryString({page, per_page: perPage})}`,
+            `${this.getTeamsRoute()}${buildQueryString({page, per_page: perPage, include_total_count: includeTotalCount})}`,
             {method: 'get'}
         );
     };
@@ -1003,6 +1112,13 @@ export default class Client4 {
         );
     };
 
+    invalidateAllEmailInvites = async () => {
+        return this.doFetch(
+            `${this.getTeamsRoute()}/invites/email`,
+            {method: 'delete'}
+        );
+    };
+
     getTeamInviteInfo = async (inviteId) => {
         return this.doFetch(
             `${this.getTeamsRoute()}/invite/${inviteId}`,
@@ -1102,6 +1218,20 @@ export default class Client4 {
 
     // Channel Routes
 
+    getAllChannels = async (page = 0, perPage = PER_PAGE_DEFAULT, notAssociatedToGroup = '', excludeDefaultChannels = false, includeTotalCount = false) => {
+        const queryData = {
+            page,
+            per_page: perPage,
+            not_associated_to_group: notAssociatedToGroup,
+            exclude_default_channels: excludeDefaultChannels,
+            include_total_count: includeTotalCount,
+        };
+        return this.doFetch(
+            `${this.getChannelsRoute()}${buildQueryString(queryData)}`,
+            {method: 'get'}
+        );
+    };
+
     createChannel = async (channel) => {
         this.trackEvent('api', 'api_channels_create', {team_id: channel.team_id});
 
@@ -1194,18 +1324,18 @@ export default class Client4 {
         );
     };
 
-    getChannelByName = async (teamId, channelName) => {
+    getChannelByName = async (teamId, channelName, includeDeleted = false) => {
         return this.doFetch(
-            `${this.getTeamRoute(teamId)}/channels/name/${channelName}`,
+            `${this.getTeamRoute(teamId)}/channels/name/${channelName}?include_deleted=${includeDeleted}`,
             {method: 'get'}
         );
     };
 
-    getChannelByNameAndTeamName = async (teamName, channelName) => {
-        this.trackEvent('api', 'api_channel_get_by_name_and_teamName', {channel_name: channelName, team_name: teamName});
+    getChannelByNameAndTeamName = async (teamName, channelName, includeDeleted = false) => {
+        this.trackEvent('api', 'api_channel_get_by_name_and_teamName', {channel_name: channelName, team_name: teamName, include_deleted: includeDeleted});
 
         return this.doFetch(
-            `${this.getTeamNameRoute(teamName)}/channels/name/${channelName}`,
+            `${this.getTeamNameRoute(teamName)}/channels/name/${channelName}?include_deleted=${includeDeleted}`,
             {method: 'get'}
         );
     };
@@ -1241,6 +1371,13 @@ export default class Client4 {
     getChannelMembers = async (channelId, page = 0, perPage = PER_PAGE_DEFAULT) => {
         return this.doFetch(
             `${this.getChannelMembersRoute(channelId)}${buildQueryString({page, per_page: perPage})}`,
+            {method: 'get'}
+        );
+    };
+
+    getChannelTimezones = async (channelId) => {
+        return this.doFetch(
+            `${this.getChannelRoute(channelId)}/timezones`,
             {method: 'get'}
         );
     };
@@ -1307,9 +1444,35 @@ export default class Client4 {
         );
     };
 
+    autocompleteChannelsForSearch = async (teamId, name) => {
+        return this.doFetch(
+            `${this.getTeamRoute(teamId)}/channels/search_autocomplete${buildQueryString({name})}`,
+            {method: 'get'}
+        );
+    };
+
     searchChannels = async (teamId, term) => {
         return this.doFetch(
             `${this.getTeamRoute(teamId)}/channels/search`,
+            {method: 'post', body: JSON.stringify({term})}
+        );
+    };
+
+    searchAllChannels = async (term, notAssociatedToGroup = '', excludeDefaultChannels = false) => {
+        const body = {
+            term,
+            not_associated_to_group: notAssociatedToGroup,
+            exclude_default_channels: excludeDefaultChannels,
+        };
+        return this.doFetch(
+            `${this.getChannelsRoute()}/search`,
+            {method: 'post', body: JSON.stringify(body)}
+        );
+    };
+
+    searchGroupChannels = async (term) => {
+        return this.doFetch(
+            `${this.getChannelsRoute()}/group/search`,
             {method: 'post', body: JSON.stringify({term})}
         );
     };
@@ -1381,6 +1544,13 @@ export default class Client4 {
     getPosts = async (channelId, page = 0, perPage = PER_PAGE_DEFAULT) => {
         return this.doFetch(
             `${this.getChannelRoute(channelId)}/posts${buildQueryString({page, per_page: perPage})}`,
+            {method: 'get'}
+        );
+    };
+
+    getPostsUnread = async (channelId, userId, limitAfter = 30, limitBefore = 30) => {
+        return this.doFetch(
+            `${this.getUserRoute(userId)}/channels/${channelId}/posts/unread${buildQueryString({limit_after: limitAfter, limit_before: limitBefore})}`,
             {method: 'get'}
         );
     };
@@ -1477,13 +1647,17 @@ export default class Client4 {
         );
     };
 
-    searchPosts = async (teamId, terms, isOrSearch) => {
+    searchPostsWithParams = async (teamId, params) => {
         this.trackEvent('api', 'api_posts_search', {team_id: teamId});
 
         return this.doFetch(
             `${this.getTeamRoute(teamId)}/posts/search`,
-            {method: 'post', body: JSON.stringify({terms, is_or_search: isOrSearch})}
+            {method: 'post', body: JSON.stringify(params)}
         );
+    };
+
+    searchPosts = async (teamId, terms, isOrSearch) => {
+        return this.searchPostsWithParams(teamId, {terms, is_or_search: isOrSearch});
     };
 
     getOpenGraphMetadata = async (url) => {
@@ -1493,10 +1667,26 @@ export default class Client4 {
         );
     };
 
-    doPostAction = async (postId, actionId) => {
+    doPostAction = async (postId, actionId, selectedOption = '') => {
+        return this.doPostActionWithCookie(postId, actionId, '', selectedOption);
+    };
+
+    doPostActionWithCookie = async (postId, actionId, actionCookie, selectedOption = '') => {
+        if (selectedOption) {
+            this.trackEvent('api', 'api_interactive_messages_menu_selected');
+        } else {
+            this.trackEvent('api', 'api_interactive_messages_button_clicked');
+        }
+
+        const msg = {
+            selected_option: selectedOption,
+        };
+        if (actionCookie !== '') {
+            msg.cookie = actionCookie;
+        }
         return this.doFetch(
             `${this.getPostRoute(postId)}/actions/${encodeURIComponent(actionId)}`,
-            {method: 'post'}
+            {method: 'post', body: JSON.stringify(msg)}
         );
     };
 
@@ -1589,14 +1779,17 @@ export default class Client4 {
     };
 
     logClientError = async (message, level = 'ERROR') => {
+        const url = `${this.getBaseRoute()}/logs`;
+
         if (!this.enableLogging) {
-            throw {
+            throw new ClientError(this.getUrl(), {
                 message: 'Logging disabled.',
-            };
+                url,
+            });
         }
 
         return this.doFetch(
-            `${this.getBaseRoute()}/logs`,
+            url,
             {method: 'post', body: JSON.stringify({message, level})}
         );
     };
@@ -1857,6 +2050,14 @@ export default class Client4 {
         );
     };
 
+    submitInteractiveDialog = async (data) => {
+        this.trackEvent('api', 'api_interactive_messages_dialog_submitted');
+        return this.doFetch(
+            `${this.getBaseRoute()}/actions/dialogs/submit`,
+            {method: 'post', body: JSON.stringify(data)},
+        );
+    };
+
     // Emoji Routes
 
     createCustomEmoji = async (emoji, imageData) => {
@@ -2104,6 +2305,13 @@ export default class Client4 {
         );
     };
 
+    deleteBrandImage = async () => {
+        return this.doFetch(
+            `${this.getBrandRoute()}/image`,
+            {method: 'delete'}
+        );
+    };
+
     getClusterStatus = async () => {
         return this.doFetch(
             `${this.getBaseRoute()}/cluster/status`,
@@ -2122,6 +2330,28 @@ export default class Client4 {
         return this.doFetch(
             `${this.getBaseRoute()}/ldap/sync`,
             {method: 'post'}
+        );
+    };
+
+    getLdapGroups = async (page = 0, perPage = PER_PAGE_DEFAULT, opts = {}) => {
+        const query = {page, per_page: perPage, ...opts};
+        return this.doFetch(
+            `${this.getBaseRoute()}/ldap/groups${buildQueryString(query)}`,
+            {method: 'get'}
+        );
+    };
+
+    linkLdapGroup = async (key) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/ldap/groups/${encodeURI(key)}/link`,
+            {method: 'post'}
+        );
+    };
+
+    unlinkLdapGroup = async (key) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/ldap/groups/${encodeURI(key)}/link`,
+            {method: 'delete'}
         );
     };
 
@@ -2332,10 +2562,13 @@ export default class Client4 {
 
     // Plugin Routes - EXPERIMENTAL - SUBJECT TO CHANGE
 
-    uploadPlugin = async (fileData) => {
+    uploadPlugin = async (fileData, force = false) => {
         this.trackEvent('api', 'api_plugin_upload');
 
         const formData = new FormData();
+        if (force) {
+            formData.append('force', 'true');
+        }
         formData.append('plugin', fileData);
 
         const request = {
@@ -2352,6 +2585,17 @@ export default class Client4 {
         return this.doFetch(
             this.getPluginsRoute(),
             request
+        );
+    };
+
+    installPluginFromUrl = async (pluginDownloadUrl, force = false) => {
+        this.trackEvent('api', 'api_install_plugin');
+
+        const queryParams = {plugin_download_url: pluginDownloadUrl, force};
+
+        return this.doFetch(
+            `${this.getPluginsRoute()}/install_from_url${buildQueryString(queryParams)}`,
+            {method: 'post'}
         );
     };
 
@@ -2383,19 +2627,193 @@ export default class Client4 {
         );
     };
 
-    activatePlugin = async (pluginId) => {
+    enablePlugin = async (pluginId) => {
         return this.doFetch(
-            `${this.getPluginRoute(pluginId)}/activate`,
+            `${this.getPluginRoute(pluginId)}/enable`,
             {method: 'post'}
         );
     };
 
-    deactivatePlugin = async (pluginId) => {
+    disablePlugin = async (pluginId) => {
         return this.doFetch(
-            `${this.getPluginRoute(pluginId)}/deactivate`,
+            `${this.getPluginRoute(pluginId)}/disable`,
             {method: 'post'}
         );
     };
+
+    // Groups
+
+    linkGroupSyncable = async (groupID, syncableID, syncableType, patch) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/groups/${groupID}/${syncableType}s/${syncableID}/link`,
+            {method: 'post', body: JSON.stringify(patch)}
+        );
+    };
+
+    unlinkGroupSyncable = async (groupID, syncableID, syncableType) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/groups/${groupID}/${syncableType}s/${syncableID}/link`,
+            {method: 'delete'}
+        );
+    };
+
+    getGroupSyncables = async (groupID, syncableType) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/groups/${groupID}/${syncableType}s`,
+            {method: 'get'}
+        );
+    };
+
+    getGroupMembers = async (groupID, page = 0, perPage = PER_PAGE_DEFAULT) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/groups/${groupID}/members${buildQueryString({page, per_page: perPage})}`,
+            {method: 'get'}
+        );
+    };
+
+    getGroup = async (groupID) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/groups/${groupID}`,
+            {method: 'get'}
+        );
+    };
+
+    getGroupsNotAssociatedToTeam = async (teamID, q = '', page = 0, perPage = PER_PAGE_DEFAULT) => {
+        this.trackEvent('api', 'api_groups_get_not_associated_to_team', {team_id: teamID});
+        return this.doFetch(
+            `${this.getBaseRoute()}/groups${buildQueryString({not_associated_to_team: teamID, page, per_page: perPage, q, include_member_count: true})}`,
+            {method: 'get'}
+        );
+    };
+
+    getGroupsNotAssociatedToChannel = async (channelID, q = '', page = 0, perPage = PER_PAGE_DEFAULT) => {
+        this.trackEvent('api', 'api_groups_get_not_associated_to_channel', {channel_id: channelID});
+        return this.doFetch(
+            `${this.getBaseRoute()}/groups${buildQueryString({not_associated_to_channel: channelID, page, per_page: perPage, q, include_member_count: true})}`,
+            {method: 'get'}
+        );
+    };
+
+    getGroupsAssociatedToTeam = async (teamID, q = '', page = 0, perPage = PER_PAGE_DEFAULT) => {
+        this.trackEvent('api', 'api_groups_get_associated_to_team', {team_id: teamID});
+        return this.doFetch(
+            `${this.getBaseRoute()}/teams/${teamID}/groups${buildQueryString({page, per_page: perPage, q, include_member_count: true})}`,
+            {method: 'get'}
+        );
+    };
+
+    getGroupsAssociatedToChannel = async (channelID, q = '', page = 0, perPage = PER_PAGE_DEFAULT) => {
+        this.trackEvent('api', 'api_groups_get_associated_to_channel', {channel_id: channelID});
+        return this.doFetch(
+            `${this.getBaseRoute()}/channels/${channelID}/groups${buildQueryString({page, per_page: perPage, q, include_member_count: true})}`,
+            {method: 'get'}
+        );
+    };
+
+    getAllGroupsAssociatedToTeam = async (teamID) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/teams/${teamID}/groups?paginate=false`,
+            {method: 'get'}
+        );
+    };
+
+    getAllGroupsAssociatedToChannel = async (channelID) => {
+        return this.doFetch(
+            `${this.getBaseRoute()}/channels/${channelID}/groups?paginate=false`,
+            {method: 'get'}
+        );
+    };
+
+    // Redirect Location
+
+    getRedirectLocation = async (urlParam) => {
+        if (!urlParam.length) {
+            return Promise.resolve();
+        }
+        const url = `${this.getRedirectLocationRoute()}${buildQueryString({url: urlParam})}`;
+        return this.doFetch(url, {method: 'get'});
+    };
+
+    // Bot Routes
+
+    createBot = async (bot) => {
+        return this.doFetch(
+            `${this.getBotsRoute()}`,
+            {method: 'post', body: JSON.stringify(bot)}
+        );
+    }
+
+    patchBot = async (botUserId, botPatch) => {
+        return this.doFetch(
+            `${this.getBotRoute(botUserId)}`,
+            {method: 'put', body: JSON.stringify(botPatch)}
+        );
+    }
+
+    getBot = async (botUserId) => {
+        return this.doFetch(
+            `${this.getBotRoute(botUserId)}`,
+            {method: 'get'}
+        );
+    }
+
+    getBots = async (page = 0, perPage = PER_PAGE_DEFAULT) => {
+        return this.doFetch(
+            `${this.getBotsRoute()}${buildQueryString({page, per_page: perPage})}`,
+            {method: 'get'}
+        );
+    }
+
+    getBotsIncludeDeleted = async (page = 0, perPage = PER_PAGE_DEFAULT) => {
+        return this.doFetch(
+            `${this.getBotsRoute()}${buildQueryString({include_deleted: true, page, per_page: perPage})}`,
+            {method: 'get'}
+        );
+    }
+
+    getBotsOrphaned = async (page = 0, perPage = PER_PAGE_DEFAULT) => {
+        return this.doFetch(
+            `${this.getBotsRoute()}${buildQueryString({only_orphaned: true, page, per_page: perPage})}`,
+            {method: 'get'}
+        );
+    }
+
+    disableBot = async (botUserId) => {
+        return this.doFetch(
+            `${this.getBotRoute(botUserId)}/disable`,
+            {method: 'post'}
+        );
+    }
+
+    enableBot = async (botUserId) => {
+        return this.doFetch(
+            `${this.getBotRoute(botUserId)}/enable`,
+            {method: 'post'}
+        );
+    }
+
+    assignBot = async (botUserId, newOwnerId) => {
+        return this.doFetch(
+            `${this.getBotRoute(botUserId)}/assign/${newOwnerId}`,
+            {method: 'post'}
+        );
+    }
+
+    teamMembersMinusGroupMembers = async (teamID, groupIDs, page, perPage) => {
+        const query = `group_ids=${groupIDs.join(',')}&page=${page}&per_page=${perPage}`;
+        return this.doFetch(
+            `${this.getTeamRoute(teamID)}/members_minus_group_members?${query}`,
+            {method: 'get'},
+        );
+    }
+
+    channelMembersMinusGroupMembers = async (channelID, groupIDs, page, perPage) => {
+        const query = `group_ids=${groupIDs.join(',')}&page=${page}&per_page=${perPage}`;
+        return this.doFetch(
+            `${this.getChannelRoute(channelID)}/members_minus_group_members?${query}`,
+            {method: 'get'},
+        );
+    }
 
     // Client Helpers
 
@@ -2406,13 +2824,6 @@ export default class Client4 {
     };
 
     doFetchWithResponse = async (url, options) => {
-        if (!this.online) {
-            throw {
-                message: 'no internet connection',
-                url,
-            };
-        }
-
         const response = await fetch(url, this.getOptions(options));
         const headers = parseAndMergeNestedHeaders(response.headers);
 
@@ -2420,21 +2831,20 @@ export default class Client4 {
         try {
             data = await response.json();
         } catch (err) {
-            throw {
+            throw new ClientError(this.getUrl(), {
+                message: 'Received invalid response from the server.',
                 intl: {
                     id: 'mobile.request.invalid_response',
                     defaultMessage: 'Received invalid response from the server.',
                 },
-            };
+                url,
+            });
         }
 
-        // Need to only accept version in the header from requests that are not cached
-        // to avoid getting an old version from a cached response
         if (headers.has(HEADER_X_VERSION_ID) && !headers.get('Cache-Control')) {
             const serverVersion = headers.get(HEADER_X_VERSION_ID);
             if (serverVersion && this.serverVersion !== serverVersion) {
                 this.serverVersion = serverVersion;
-                EventEmitter.emit(General.SERVER_VERSION_CHANGED, serverVersion);
             }
         }
 
@@ -2459,16 +2869,31 @@ export default class Client4 {
             console.error(msg); // eslint-disable-line no-console
         }
 
-        throw {
+        throw new ClientError(this.getUrl(), {
             message: msg,
             server_error_id: data.id,
             status_code: data.status_code,
             url,
-        };
+        });
     };
 
     trackEvent(category, event, props) {
-        const properties = Object.assign({category, type: event, user_actual_id: this.userId}, props);
+        // Temporary change to allow only certain events to reduce data rate - see MM-13062
+        if (![
+            'api_posts_create',
+            'api_interactive_messages_button_clicked',
+            'api_interactive_messages_menu_selected',
+            'api_interactive_messages_dialog_submitted',
+        ].includes(event)) {
+            return;
+        }
+
+        const properties = Object.assign({
+            category,
+            type: event,
+            user_actual_role: this.userRoles && isSystemAdmin(this.userRoles) ? 'system_admin, system_user' : 'system_user',
+            user_actual_id: this.userId,
+        }, props);
         const options = {
             context: {
                 ip: '0.0.0.0',
@@ -2497,25 +2922,6 @@ export default class Client4 {
     }
 }
 
-function buildQueryString(parameters) {
-    const keys = Object.keys(parameters);
-    if (keys.length === 0) {
-        return '';
-    }
-
-    let query = '?';
-    for (let i = 0; i < keys.length; i++) {
-        const key = keys[i];
-        query += key + '=' + encodeURIComponent(parameters[key]);
-
-        if (i < keys.length - 1) {
-            query += '&';
-        }
-    }
-
-    return query;
-}
-
 function parseAndMergeNestedHeaders(originalHeaders) {
     const headers = new Map();
     let nestedHeaders = new Map();
@@ -2533,4 +2939,20 @@ function parseAndMergeNestedHeaders(originalHeaders) {
         headers.set(capitalizedKey, realVal);
     });
     return new Map([...headers, ...nestedHeaders]);
+}
+
+export class ClientError extends Error {
+    constructor(baseUrl, data) {
+        super(data.message + ': ' + cleanUrlForLogging(baseUrl, data.url));
+
+        this.message = data.message;
+        this.url = data.url;
+        this.intl = data.intl;
+        this.server_error_id = data.server_error_id;
+        this.status_code = data.status_code;
+
+        // Ensure message is treated as a property of this class when object spreading. Without this,
+        // copying the object by using `{...error}` would not include the message.
+        Object.defineProperty(this, 'message', {enumerable: true});
+    }
 }

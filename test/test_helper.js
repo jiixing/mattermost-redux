@@ -9,9 +9,8 @@ import Client4 from 'client/client4';
 import {DEFAULT_LOCALE} from 'constants/general';
 import {generateId} from 'utils/helpers';
 
-const DEFAULT_SERVER = `${process.env.MATTERMOST_SERVER_URL || 'http://localhost:8065'}`; //eslint-disable-line no-process-env
-const EMAIL = `${process.env.MATTERMOST_REDUX_EMAIL || 'redux-admin@simulator.amazonses.com'}`; //eslint-disable-line no-process-env
-const PASSWORD = `${process.env.MATTERMOST_REDUX_PASSWORD || 'password1'}`; //eslint-disable-line no-process-env
+const DEFAULT_SERVER = 'http://localhost:8065';
+const PASSWORD = 'password1';
 
 class TestHelper {
     constructor() {
@@ -66,6 +65,7 @@ class TestHelper {
             last_name: this.generateId(),
             create_at: Date.now(),
             delete_at: 0,
+            roles: 'system_user',
         };
     };
 
@@ -228,6 +228,19 @@ class TestHelper {
         };
     };
 
+    fakeDmChannel = (userId, otherUserId) => {
+        return {
+            name: `${userId}__${otherUserId}`,
+            team_id: '',
+            display_name: `${otherUserId}`,
+            type: 'D',
+            status: 'offline',
+            teammate_id: `${otherUserId}`,
+            id: this.generateId(),
+            delete_at: 0,
+        };
+    }
+
     fakeChannelMember = (userId, channelId) => {
         return {
             user_id: userId,
@@ -289,6 +302,18 @@ class TestHelper {
         };
     };
 
+    fakeBot = () => {
+        return {
+            user_id: this.generateId(),
+            username: this.generateId(),
+            display_name: 'Fake bot',
+            owner_id: this.generateId(),
+            create_at: 1507840900004,
+            update_at: 1507840900004,
+            delete_at: 0,
+        };
+    }
+
     mockLogin = () => {
         nock(this.basicClient4.getUsersRoute()).
             post('/login').
@@ -309,23 +334,6 @@ class TestHelper {
         nock(this.basicClient4.getPreferencesRoute('me')).
             get('').
             reply(200, [{user_id: this.basicUser.id, category: 'tutorial_step', name: this.basicUser.id, value: '999'}]);
-    }
-
-    initRealEntities = async () => {
-        try {
-            this.basicUser = await this.basicClient4.login(EMAIL, PASSWORD);
-            this.basicUser.password = PASSWORD;
-            this.basicTeam = await this.basicClient4.createTeam(this.fakeTeam());
-            this.basicChannel = await this.basicClient4.createChannel(this.fakeChannel(this.basicTeam.id));
-            this.basicPost = await this.basicClient4.createPost(this.fakePost(this.basicChannel.id));
-        } catch (error) {
-            console.error('Unable to initialize against server: ' + error); //eslint-disable-line no-console
-            throw error;
-        }
-    }
-
-    isLiveServer = () => {
-        return process.env.TEST_SERVER; //eslint-disable-line no-process-env
     }
 
     initMockEntities = () => {
@@ -411,12 +419,8 @@ class TestHelper {
         client4.setUrl(DEFAULT_SERVER);
         this.basicClient4 = client4;
 
-        if (process.env.TEST_SERVER) { //eslint-disable-line no-process-env
-            await this.initRealEntities();
-        } else {
-            this.initMockEntities();
-            this.activateMocking();
-        }
+        this.initMockEntities();
+        this.activateMocking();
 
         return {
             client4: this.basicClient4,
@@ -428,11 +432,7 @@ class TestHelper {
     };
 
     tearDown = async () => {
-        if (process.env.TEST_SERVER) { //eslint-disable-line no-process-env
-            await this.basicClient4.logout();
-        } else {
-            nock.restore();
-        }
+        nock.restore();
 
         this.basicClient4 = null;
         this.basicUser = null;

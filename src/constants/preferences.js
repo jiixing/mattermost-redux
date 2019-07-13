@@ -25,6 +25,7 @@ export default {
     INTERVAL_HOUR: 60 * 60,
     INTERVAL_IMMEDIATE: 30, // "immediate" is a 30 second interval
     INTERVAL_NEVER: 0,
+    INTERVAL_NOT_SET: -1,
 
     CATEGORY_DISPLAY_SETTINGS: 'display_settings',
     NAME_NAME_FORMAT: 'name_format',
@@ -39,6 +40,8 @@ export default {
 
     CATEGORY_ADVANCED_SETTINGS: 'advanced_settings',
     ADVANCED_FILTER_JOIN_LEAVE: 'join_leave',
+    ADVANCED_CODE_BLOCK_ON_CTRL_ENTER: 'code_block_ctrl_enter',
+    ADVANCED_SEND_ON_CTRL_ENTER: 'send_on_ctrl_enter',
 
     CATEGORY_THEME: 'theme',
     THEMES: {

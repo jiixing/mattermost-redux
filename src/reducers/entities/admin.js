@@ -3,7 +3,7 @@
 
 import {combineReducers} from 'redux';
 import {AdminTypes, UserTypes} from 'action_types';
-import {Stats} from 'constants';
+import {Stats, Plugins} from 'constants';
 import PluginState from 'constants/plugins';
 
 function logs(state = [], action) {
@@ -40,6 +40,20 @@ function config(state = {}, action) {
     switch (action.type) {
     case AdminTypes.RECEIVED_CONFIG: {
         return action.data;
+    }
+    case AdminTypes.ENABLED_PLUGIN: {
+        const nextPluginSettings = {...state.PluginSettings};
+        const nextPluginStates = {...nextPluginSettings.PluginStates};
+        nextPluginStates[action.data] = {Enable: true};
+        nextPluginSettings.PluginStates = nextPluginStates;
+        return {...state, PluginSettings: nextPluginSettings};
+    }
+    case AdminTypes.DISABLED_PLUGIN: {
+        const nextPluginSettings = {...state.PluginSettings};
+        const nextPluginStates = {...nextPluginSettings.PluginStates};
+        nextPluginStates[action.data] = {Enable: false};
+        nextPluginSettings.PluginStates = nextPluginStates;
+        return {...state, PluginSettings: nextPluginSettings};
     }
     case UserTypes.LOGOUT_SUCCESS:
         return {};
@@ -110,22 +124,29 @@ function samlCertStatus(state = {}, action) {
     }
 }
 
-function convertAnalyticsRowsToStats(data, name) {
+export function convertAnalyticsRowsToStats(data, name) {
     const stats = {};
+    const clonedData = [...data];
 
     if (name === 'post_counts_day') {
-        data.reverse();
-        stats[Stats.POST_PER_DAY] = data;
+        clonedData.reverse();
+        stats[Stats.POST_PER_DAY] = clonedData;
+        return stats;
+    }
+
+    if (name === 'bot_post_counts_day') {
+        clonedData.reverse();
+        stats[Stats.BOT_POST_PER_DAY] = clonedData;
         return stats;
     }
 
     if (name === 'user_counts_with_posts_day') {
-        data.reverse();
-        stats[Stats.USERS_WITH_POSTS_PER_DAY] = data;
+        clonedData.reverse();
+        stats[Stats.USERS_WITH_POSTS_PER_DAY] = clonedData;
         return stats;
     }
 
-    data.forEach((row) => {
+    clonedData.forEach((row) => {
         let key;
         switch (row.name) {
         case 'channel_open_count':
@@ -341,11 +362,6 @@ function userAccessTokensForUser(state = {}, action) {
 
 function plugins(state = {}, action) {
     switch (action.type) {
-    case AdminTypes.RECEIVED_PLUGIN: {
-        const nextState = {...state};
-        nextState[action.data.id] = action.data;
-        return nextState;
-    }
     case AdminTypes.RECEIVED_PLUGINS: {
         const nextState = {...state};
         const activePlugins = action.data.active;
@@ -364,7 +380,7 @@ function plugins(state = {}, action) {
         Reflect.deleteProperty(nextState, action.data);
         return nextState;
     }
-    case AdminTypes.ACTIVATED_PLUGIN: {
+    case AdminTypes.ENABLED_PLUGIN: {
         const nextState = {...state};
         const plugin = nextState[action.data];
         if (plugin && !plugin.active) {
@@ -373,7 +389,7 @@ function plugins(state = {}, action) {
         }
         return state;
     }
-    case AdminTypes.DEACTIVATED_PLUGIN: {
+    case AdminTypes.DISABLED_PLUGIN: {
         const nextState = {...state};
         const plugin = nextState[action.data];
         if (plugin && plugin.active) {
@@ -416,7 +432,7 @@ function pluginStatuses(state = {}, action) {
                 name: (nextState[id] && nextState[id].name) || plugin.name,
                 description: (nextState[id] && nextState[id].description) || plugin.description,
                 version: (nextState[id] && nextState[id].version) || plugin.version,
-                is_prepackaged: (nextState[id] && nextState[id].is_prepackaged) || plugin.is_prepackaged,
+                is_prepackaged: (nextState[id] && nextState[id].is_prepackaged) || Plugins.PREPACKAGED_PLUGINS.includes(id),
                 active: pluginState > 0,
                 state: pluginState,
                 instances,
@@ -426,26 +442,7 @@ function pluginStatuses(state = {}, action) {
         return nextState;
     }
 
-    case AdminTypes.RECEIVED_PLUGIN: {
-        const plugin = action.data;
-        const existingPlugin = state[plugin.id] || {instances: []};
-
-        return {
-            ...state,
-            [plugin.id]: {
-                ...existingPlugin,
-                id: plugin.id,
-                name: plugin.name,
-                description: plugin.description,
-                version: plugin.version,
-                is_prepackaged: false,
-                active: plugin.active,
-                state: PluginState.PLUGIN_STATE_NOT_RUNNING,
-            },
-        };
-    }
-
-    case AdminTypes.ACTIVATE_PLUGIN_REQUEST: {
+    case AdminTypes.ENABLE_PLUGIN_REQUEST: {
         const pluginId = action.data;
         if (!state[pluginId]) {
             return state;
@@ -460,7 +457,7 @@ function pluginStatuses(state = {}, action) {
         };
     }
 
-    case AdminTypes.DEACTIVATE_PLUGIN_REQUEST: {
+    case AdminTypes.DISABLE_PLUGIN_REQUEST: {
         const pluginId = action.data;
         if (!state[pluginId]) {
             return state;
@@ -487,6 +484,73 @@ function pluginStatuses(state = {}, action) {
         return nextState;
     }
 
+    case UserTypes.LOGOUT_SUCCESS:
+        return {};
+
+    default:
+        return state;
+    }
+}
+
+function ldapGroupsCount(state = {}, action) {
+    switch (action.type) {
+    case AdminTypes.RECEIVED_LDAP_GROUPS:
+        return action.data.count;
+    case UserTypes.LOGOUT_SUCCESS:
+        return 0;
+    default:
+        return state;
+    }
+}
+
+function ldapGroups(state = {}, action) {
+    switch (action.type) {
+    case AdminTypes.RECEIVED_LDAP_GROUPS: {
+        const nextState = {};
+        for (const group of action.data.groups) {
+            nextState[group.primary_key] = group;
+        }
+        return nextState;
+    }
+    case AdminTypes.LINKED_LDAP_GROUP: {
+        const nextState = {...state};
+        if (nextState[action.data.primary_key]) {
+            nextState[action.data.primary_key] = action.data;
+        }
+        return nextState;
+    }
+    case AdminTypes.UNLINKED_LDAP_GROUP: {
+        const nextState = {...state};
+        if (nextState[action.data]) {
+            nextState[action.data] = {
+                ...nextState[action.data],
+                mattermost_group_id: null,
+                has_syncables: null,
+                failed: false,
+            };
+        }
+        return nextState;
+    }
+    case AdminTypes.LINK_LDAP_GROUP_FAILURE: {
+        const nextState = {...state};
+        if (nextState[action.data]) {
+            nextState[action.data] = {
+                ...nextState[action.data],
+                failed: true,
+            };
+        }
+        return nextState;
+    }
+    case AdminTypes.UNLINK_LDAP_GROUP_FAILURE: {
+        const nextState = {...state};
+        if (nextState[action.data]) {
+            nextState[action.data] = {
+                ...nextState[action.data],
+                failed: true,
+            };
+        }
+        return nextState;
+    }
     case UserTypes.LOGOUT_SUCCESS:
         return {};
 
@@ -536,4 +600,10 @@ export default combineReducers({
 
     // object with plugin ids as keys and objects representing plugin statuses across the cluster
     pluginStatuses,
+
+    // object representing the ldap groups
+    ldapGroups,
+
+    // total ldap groups
+    ldapGroupsCount,
 });

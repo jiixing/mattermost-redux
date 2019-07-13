@@ -2,7 +2,7 @@
 // See LICENSE.txt for license information.
 
 import {combineReducers} from 'redux';
-import {UserTypes} from 'action_types';
+import {UserTypes, ChannelTypes} from 'action_types';
 import {profileListToMap} from 'utils/user_utils';
 
 function profilesToSet(state, action) {
@@ -18,9 +18,9 @@ function profilesToSet(state, action) {
     };
 }
 
-function profileListToSet(state, action) {
+function profileListToSet(state, action, replace = false) {
     const id = action.id;
-    const nextSet = new Set(state[id]);
+    const nextSet = replace ? new Set() : new Set(state[id]);
     if (action.data) {
         action.data.forEach((profile) => {
             nextSet.add(profile.id);
@@ -114,6 +114,9 @@ function mySessions(state = [], action) {
         }
         return state;
 
+    case UserTypes.REVOKE_SESSIONS_FOR_ALL_USERS_SUCCESS:
+        return [];
+
     case UserTypes.LOGOUT_SUCCESS:
         return [];
 
@@ -140,9 +143,16 @@ function profiles(state = {}, action) {
     case UserTypes.RECEIVED_ME:
     case UserTypes.RECEIVED_PROFILE: {
         const data = action.data || action.payload;
+        const user = {...data};
+        const oldUser = state[data.id];
+        if (oldUser) {
+            user.terms_of_service_id = oldUser.terms_of_service_id;
+            user.terms_of_service_create_at = oldUser.terms_of_service_create_at;
+        }
+
         return {
             ...state,
-            [data.id]: {...data},
+            [data.id]: user,
         };
     }
     case UserTypes.RECEIVED_PROFILES_LIST:
@@ -152,6 +162,17 @@ function profiles(state = {}, action) {
 
     case UserTypes.LOGOUT_SUCCESS:
         return {};
+    case UserTypes.RECEIVED_TERMS_OF_SERVICE_STATUS: {
+        const data = action.data || action.payload;
+        return {
+            ...state,
+            [data.user_id]: {
+                ...state[data.user_id],
+                terms_of_service_id: data.terms_of_service_id,
+                terms_of_service_create_at: data.terms_of_service_create_at,
+            },
+        };
+    }
 
     default:
         return state;
@@ -190,6 +211,9 @@ function profilesNotInTeam(state = {}, action) {
 
     case UserTypes.RECEIVED_PROFILES_LIST_NOT_IN_TEAM:
         return profileListToSet(state, action);
+
+    case UserTypes.RECEIVED_PROFILES_LIST_NOT_IN_TEAM_AND_REPLACE:
+        return profileListToSet(state, action, true);
 
     case UserTypes.RECEIVED_PROFILE_IN_TEAM:
         return removeProfileFromSet(state, action);
@@ -244,6 +268,12 @@ function profilesInChannel(state = {}, action) {
     case UserTypes.RECEIVED_PROFILE_NOT_IN_CHANNEL:
         return removeProfileFromSet(state, action);
 
+    case ChannelTypes.CHANNEL_MEMBER_REMOVED:
+        return removeProfileFromSet(state, {data: {
+            id: action.data.channel_id,
+            user_id: action.data.user_id,
+        }});
+
     case UserTypes.LOGOUT_SUCCESS:
         return {};
 
@@ -260,11 +290,20 @@ function profilesNotInChannel(state = {}, action) {
     case UserTypes.RECEIVED_PROFILES_LIST_NOT_IN_CHANNEL:
         return profileListToSet(state, action);
 
+    case UserTypes.RECEIVED_PROFILES_LIST_NOT_IN_CHANNEL_AND_REPLACE:
+        return profileListToSet(state, action, true);
+
     case UserTypes.RECEIVED_PROFILES_NOT_IN_CHANNEL:
         return profilesToSet(state, action);
 
     case UserTypes.RECEIVED_PROFILE_IN_CHANNEL:
         return removeProfileFromSet(state, action);
+
+    case ChannelTypes.CHANNEL_MEMBER_ADDED:
+        return removeProfileFromSet(state, {data: {
+            id: action.data.channel_id,
+            user_id: action.data.user_id,
+        }});
 
     case UserTypes.LOGOUT_SUCCESS:
         return {};

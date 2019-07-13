@@ -12,9 +12,14 @@ import {getCurrentUserId, getCurrentUserMentionKeys} from 'selectors/entities/us
 import {getChannelAndMyMember, getChannelMembers} from './channels';
 import {forceLogoutIfNecessary} from './helpers';
 import {logError} from './errors';
-import {getProfilesAndStatusesForPosts} from './posts';
+import {
+    getProfilesAndStatusesForPosts,
+    receivedPosts,
+} from './posts';
 
-function getMissingChannelsFromPosts(posts) {
+const WEBAPP_SEARCH_PER_PAGE = 20;
+
+export function getMissingChannelsFromPosts(posts) {
     return async (dispatch, getState) => {
         const {channels, membersInChannel, myMembers} = getState().entities.channels;
         const promises = [];
@@ -22,11 +27,11 @@ function getMissingChannelsFromPosts(posts) {
         Object.values(posts).forEach((post) => {
             const id = post.channel_id;
             if (!channels[id] || !myMembers[id]) {
-                promises.push(getChannelAndMyMember(id)(dispatch, getState));
+                promises.push(dispatch(getChannelAndMyMember(id)));
             }
 
             if (!membersInChannel[id]) {
-                promises.push(getChannelMembers(id)(dispatch, getState));
+                promises.push(dispatch(getChannelMembers(id)));
             }
         });
 
@@ -34,24 +39,28 @@ function getMissingChannelsFromPosts(posts) {
     };
 }
 
-export function searchPosts(teamId, terms, isOrSearch = false) {
+export function searchPostsWithParams(teamId, params) {
     return async (dispatch, getState) => {
-        dispatch({type: SearchTypes.SEARCH_POSTS_REQUEST}, getState);
+        const isGettingMore = (params.page > 0);
+        dispatch({
+            type: SearchTypes.SEARCH_POSTS_REQUEST,
+            isGettingMore,
+        });
 
         let posts;
         try {
-            posts = await Client4.searchPosts(teamId, terms, isOrSearch);
+            posts = await Client4.searchPostsWithParams(teamId, params);
 
             await Promise.all([
                 getProfilesAndStatusesForPosts(posts.posts, dispatch, getState),
-                getMissingChannelsFromPosts(posts.posts)(dispatch, getState),
+                dispatch(getMissingChannelsFromPosts(posts.posts)),
             ]);
         } catch (error) {
             forceLogoutIfNecessary(error, dispatch, getState);
             dispatch(batchActions([
                 {type: SearchTypes.SEARCH_POSTS_FAILURE, error},
-                logError(error)(dispatch),
-            ]), getState);
+                logError(error),
+            ]));
             return {error};
         }
 
@@ -59,27 +68,46 @@ export function searchPosts(teamId, terms, isOrSearch = false) {
             {
                 type: SearchTypes.RECEIVED_SEARCH_POSTS,
                 data: posts,
+                isGettingMore,
             },
+            receivedPosts(posts),
             {
                 type: SearchTypes.RECEIVED_SEARCH_TERM,
                 data: {
                     teamId,
-                    terms,
-                    isOrSearch,
+                    params,
+                    isEnd: (posts.order.length < params.per_page),
                 },
             },
             {
                 type: SearchTypes.SEARCH_POSTS_SUCCESS,
             },
-        ], 'SEARCH_POST_BATCH'), getState);
+        ], 'SEARCH_POST_BATCH'));
 
         return {data: posts};
     };
 }
 
-export function clearSearch() {
+export function searchPosts(teamId, terms, isOrSearch, includeDeletedChannels) {
+    return searchPostsWithParams(teamId, {terms, is_or_search: isOrSearch, include_deleted_channels: includeDeletedChannels, page: 0, per_page: WEBAPP_SEARCH_PER_PAGE});
+}
+
+export function getMorePostsForSearch() {
     return async (dispatch, getState) => {
-        dispatch({type: SearchTypes.REMOVE_SEARCH_POSTS}, getState);
+        const teamId = getCurrentTeamId(getState());
+        const {params, isEnd} = getState().entities.search.current[teamId];
+        if (!isEnd) {
+            const newParams = Object.assign({}, params);
+            newParams.page += 1;
+            return dispatch(searchPostsWithParams(teamId, newParams));
+        }
+        return {};
+    };
+}
+
+export function clearSearch() {
+    return async (dispatch) => {
+        dispatch({type: SearchTypes.REMOVE_SEARCH_POSTS});
 
         return {data: true};
     };
@@ -91,21 +119,21 @@ export function getFlaggedPosts() {
         const userId = getCurrentUserId(state);
         const teamId = getCurrentTeamId(state);
 
-        dispatch({type: SearchTypes.SEARCH_FLAGGED_POSTS_REQUEST}, getState);
+        dispatch({type: SearchTypes.SEARCH_FLAGGED_POSTS_REQUEST});
 
         let posts;
         try {
             posts = await Client4.getFlaggedPosts(userId, '', teamId);
             await Promise.all([
                 getProfilesAndStatusesForPosts(posts.posts, dispatch, getState),
-                getMissingChannelsFromPosts(posts.posts)(dispatch, getState),
+                dispatch(getMissingChannelsFromPosts(posts.posts)),
             ]);
         } catch (error) {
             forceLogoutIfNecessary(error, dispatch, getState);
             dispatch(batchActions([
                 {type: SearchTypes.SEARCH_FLAGGED_POSTS_FAILURE, error},
-                logError(error)(dispatch),
-            ]), getState);
+                logError(error),
+            ]));
             return {error};
         }
 
@@ -114,12 +142,64 @@ export function getFlaggedPosts() {
                 type: SearchTypes.RECEIVED_SEARCH_FLAGGED_POSTS,
                 data: posts,
             },
+            receivedPosts(posts),
             {
                 type: SearchTypes.SEARCH_FLAGGED_POSTS_SUCCESS,
             },
-        ], 'SEARCH_FLAGGED_POSTS_BATCH'), getState);
+        ], 'SEARCH_FLAGGED_POSTS_BATCH'));
 
         return {data: posts};
+    };
+}
+
+export function getPinnedPosts(channelId) {
+    return async (dispatch, getState) => {
+        dispatch({type: SearchTypes.SEARCH_PINNED_POSTS_REQUEST});
+
+        let result;
+        try {
+            result = await Client4.getPinnedPosts(channelId);
+            await Promise.all([
+                getProfilesAndStatusesForPosts(result.posts, dispatch, getState),
+                dispatch(getMissingChannelsFromPosts(result.posts)),
+            ]);
+        } catch (error) {
+            forceLogoutIfNecessary(error, dispatch, getState);
+            dispatch(batchActions([
+                {type: SearchTypes.SEARCH_PINNED_POSTS_FAILURE, error},
+                logError(error),
+            ]));
+            return {error};
+        }
+
+        dispatch(batchActions([
+            {
+                type: SearchTypes.RECEIVED_SEARCH_PINNED_POSTS,
+                data: {
+                    pinned: result,
+                    channelId,
+                },
+            },
+            receivedPosts(result),
+            {
+                type: SearchTypes.SEARCH_PINNED_POSTS_SUCCESS,
+            },
+        ], 'SEARCH_PINNED_POSTS_BATCH'));
+
+        return {data: result};
+    };
+}
+
+export function clearPinnedPosts(channelId) {
+    return async (dispatch) => {
+        dispatch({
+            type: SearchTypes.REMOVE_SEARCH_PINNED_POSTS,
+            data: {
+                channelId,
+            },
+        });
+
+        return {data: true};
     };
 }
 
@@ -128,7 +208,7 @@ export function getRecentMentions() {
         const state = getState();
         const teamId = getCurrentTeamId(state);
 
-        dispatch({type: SearchTypes.SEARCH_RECENT_MENTIONS_REQUEST}, getState);
+        dispatch({type: SearchTypes.SEARCH_RECENT_MENTIONS_REQUEST});
 
         let posts;
         try {
@@ -143,14 +223,14 @@ export function getRecentMentions() {
 
             await Promise.all([
                 getProfilesAndStatusesForPosts(posts.posts, dispatch, getState),
-                getMissingChannelsFromPosts(posts.posts)(dispatch, getState),
+                dispatch(getMissingChannelsFromPosts(posts.posts)),
             ]);
         } catch (error) {
             forceLogoutIfNecessary(error, dispatch, getState);
             dispatch(batchActions([
                 {type: SearchTypes.SEARCH_RECENT_MENTIONS_FAILURE, error},
-                logError(error)(dispatch),
-            ]), getState);
+                logError(error),
+            ]));
             return {error};
         }
 
@@ -159,24 +239,25 @@ export function getRecentMentions() {
                 type: SearchTypes.RECEIVED_SEARCH_POSTS,
                 data: posts,
             },
+            receivedPosts(posts),
             {
                 type: SearchTypes.SEARCH_RECENT_MENTIONS_SUCCESS,
             },
-        ], 'SEARCH_RECENT_MENTIONS_BATCH'), getState);
+        ], 'SEARCH_RECENT_MENTIONS_BATCH'));
 
         return {data: posts};
     };
 }
 
 export function removeSearchTerms(teamId, terms) {
-    return async (dispatch, getState) => {
+    return async (dispatch) => {
         dispatch({
             type: SearchTypes.REMOVE_SEARCH_TERM,
             data: {
                 teamId,
                 terms,
             },
-        }, getState);
+        });
 
         return {data: true};
     };

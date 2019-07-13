@@ -3,12 +3,14 @@
 
 import {createSelector} from 'reselect';
 
-import {DEFAULT_LOCALE} from 'constants/general';
+import {Permissions} from 'constants';
 
-import {getCurrentUrl} from 'selectors/entities/general';
+import {getConfig, getCurrentUrl, isCompatibleWithJoinViewTeamPermissions} from 'selectors/entities/general';
+import {haveISystemPermission} from 'selectors/entities/roles';
 
 import {createIdsSelector} from 'utils/helpers';
 import {isTeamAdmin} from 'utils/user_utils';
+import {sortTeamsWithLocale} from 'utils/team_utils';
 
 export function getCurrentTeamId(state) {
     return state.entities.teams.currentTeamId;
@@ -80,8 +82,24 @@ export const isCurrentUserCurrentTeamAdmin = createSelector(
 export const getCurrentTeamUrl = createSelector(
     getCurrentUrl,
     getCurrentTeam,
-    (currentUrl, currentTeam) => {
-        return `${currentUrl}/${currentTeam.name}`;
+    (state) => getConfig(state).SiteURL,
+    (currentURL, currentTeam, siteURL) => {
+        const rootURL = `${currentURL || siteURL}`;
+        if (!currentTeam) {
+            return rootURL;
+        }
+
+        return `${rootURL}/${currentTeam.name}`;
+    }
+);
+
+export const getCurrentRelativeTeamUrl = createSelector(
+    getCurrentTeam,
+    (currentTeam) => {
+        if (!currentTeam) {
+            return '/';
+        }
+        return `/${currentTeam.name}`;
     }
 );
 
@@ -126,14 +144,63 @@ export function getTeamMember(state, teamId, userId) {
     return null;
 }
 
-export const getJoinableTeamIds = createIdsSelector(
+export const getListableTeamIds = createIdsSelector(
     getTeams,
     getTeamMemberships,
-    (teams, myMembers) => {
+    (state) => haveISystemPermission(state, {permission: Permissions.LIST_PUBLIC_TEAMS}),
+    (state) => haveISystemPermission(state, {permission: Permissions.LIST_PRIVATE_TEAMS}),
+    isCompatibleWithJoinViewTeamPermissions,
+    (teams, myMembers, canListPublicTeams, canListPrivateTeams, compatibleWithJoinViewTeamPermissions) => {
         return Object.keys(teams).filter((id) => {
             const team = teams[id];
             const member = myMembers[id];
-            return team.delete_at === 0 && team.allow_open_invite && !member;
+            let canList = team.allow_open_invite;
+            if (compatibleWithJoinViewTeamPermissions) {
+                canList = (canListPrivateTeams && !team.allow_open_invite) || (canListPublicTeams && team.allow_open_invite);
+            }
+            return team.delete_at === 0 && canList && !member;
+        });
+    }
+);
+
+export const getListableTeams = createSelector(
+    getTeams,
+    getListableTeamIds,
+    (teams, listableTeamIds) => {
+        return listableTeamIds.map((id) => teams[id]);
+    }
+);
+
+export const getSortedListableTeams = createSelector(
+    getTeams,
+    getListableTeamIds,
+    (state, locale) => locale,
+    (teams, listableTeamIds, locale) => {
+        const listableTeams = {};
+
+        for (const id of listableTeamIds) {
+            listableTeams[id] = teams[id];
+        }
+
+        return Object.values(listableTeams).sort(sortTeamsWithLocale(locale));
+    }
+);
+
+export const getJoinableTeamIds = createIdsSelector(
+    getTeams,
+    getTeamMemberships,
+    (state) => haveISystemPermission(state, {permission: Permissions.JOIN_PUBLIC_TEAMS}),
+    (state) => haveISystemPermission(state, {permission: Permissions.JOIN_PRIVATE_TEAMS}),
+    isCompatibleWithJoinViewTeamPermissions,
+    (teams, myMembers, canJoinPublicTeams, canJoinPrivateTeams, compatibleWithJoinViewTeamPermissions) => {
+        return Object.keys(teams).filter((id) => {
+            const team = teams[id];
+            const member = myMembers[id];
+            let canJoin = team.allow_open_invite;
+            if (compatibleWithJoinViewTeamPermissions) {
+                canJoin = (canJoinPrivateTeams && !team.allow_open_invite) || (canJoinPublicTeams && team.allow_open_invite);
+            }
+            return team.delete_at === 0 && canJoin && !member;
         });
     }
 );
@@ -142,13 +209,7 @@ export const getJoinableTeams = createSelector(
     getTeams,
     getJoinableTeamIds,
     (teams, joinableTeamIds) => {
-        const openTeams = {};
-
-        for (const id of joinableTeamIds) {
-            openTeams[id] = teams[id];
-        }
-
-        return openTeams;
+        return joinableTeamIds.map((id) => teams[id]);
     }
 );
 
@@ -157,21 +218,13 @@ export const getSortedJoinableTeams = createSelector(
     getJoinableTeamIds,
     (state, locale) => locale,
     (teams, joinableTeamIds, locale) => {
-        const openTeams = {};
+        const joinableTeams = {};
 
         for (const id of joinableTeamIds) {
-            openTeams[id] = teams[id];
+            joinableTeams[id] = teams[id];
         }
 
-        function sortTeams(a, b) {
-            if (a.display_name !== b.display_name) {
-                return a.display_name.toLowerCase().localeCompare(b.display_name.toLowerCase(), locale || DEFAULT_LOCALE, {numeric: true});
-            }
-
-            return a.name.toLowerCase().localeCompare(b.name.toLowerCase(), locale || DEFAULT_LOCALE, {numeric: true});
-        }
-
-        return Object.values(openTeams).sort(sortTeams);
+        return Object.values(joinableTeams).sort(sortTeamsWithLocale(locale));
     }
 );
 
@@ -180,13 +233,7 @@ export const getMySortedTeamIds = createIdsSelector(
     getTeamMemberships,
     (state, locale) => locale,
     (teams, myMembers, locale) => {
-        return Object.values(teams).filter((t) => myMembers[t.id]).sort((a, b) => {
-            if (a.display_name !== b.display_name) {
-                return a.display_name.toLowerCase().localeCompare(b.display_name.toLowerCase(), locale, {numeric: true});
-            }
-
-            return a.name.toLowerCase().localeCompare(b.name.toLowerCase(), locale, {numeric: true});
-        }).map((t) => t.id);
+        return Object.values(teams).filter((t) => myMembers[t.id]).sort(sortTeamsWithLocale(locale)).map((t) => t.id);
     }
 );
 
@@ -209,8 +256,8 @@ export const getChannelDrawerBadgeCount = createSelector(
         let messageCount = 0;
         Object.values(teamMembers).forEach((m) => {
             if (m.team_id !== currentTeamId) {
-                mentionCount = mentionCount + (m.mention_count || 0);
-                messageCount = messageCount + (m.msg_count || 0);
+                mentionCount += (m.mention_count || 0);
+                messageCount += (m.msg_count || 0);
             }
         });
 

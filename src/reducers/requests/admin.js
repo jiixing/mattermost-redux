@@ -7,8 +7,8 @@ import {AdminTypes} from 'action_types';
 
 import {handleRequest, initialRequestState} from './helpers';
 
-import type {GenericAction} from '../../types/actions';
-import type {RequestStatusType} from '../../types/requests';
+import type {GenericAction} from 'types/actions';
+import type {AdminRequestsStatuses, RequestStatusType} from 'types/requests';
 
 function getLogs(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
     return handleRequest(
@@ -140,6 +140,16 @@ function uploadBrandImage(state: RequestStatusType = initialRequestState(), acti
     );
 }
 
+function deleteBrandImage(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+    return handleRequest(
+        AdminTypes.DELETE_BRAND_IMAGE_REQUEST,
+        AdminTypes.DELETE_BRAND_IMAGE_SUCCESS,
+        AdminTypes.DELETE_BRAND_IMAGE_FAILURE,
+        state,
+        action
+    );
+}
+
 function getClusterStatus(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
     return handleRequest(
         AdminTypes.GET_CLUSTER_STATUS_REQUEST,
@@ -165,6 +175,36 @@ function syncLdap(state: RequestStatusType = initialRequestState(), action: Gene
         AdminTypes.SYNC_LDAP_REQUEST,
         AdminTypes.SYNC_LDAP_SUCCESS,
         AdminTypes.SYNC_LDAP_FAILURE,
+        state,
+        action
+    );
+}
+
+function getLdapGroups(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+    return handleRequest(
+        AdminTypes.GET_LDAP_GROUPS_REQUEST,
+        AdminTypes.GET_LDAP_GROUPS_SUCCESS,
+        AdminTypes.GET_LDAP_GROUPS_FAILURE,
+        state,
+        action
+    );
+}
+
+function linkLdapGroup(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+    return handleRequest(
+        AdminTypes.LINK_LDAP_GROUP_REQUEST,
+        AdminTypes.LINK_LDAP_GROUP_SUCCESS,
+        AdminTypes.LINK_LDAP_GROUP_FAILURE,
+        state,
+        action
+    );
+}
+
+function unlinkLdapGroup(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+    return handleRequest(
+        AdminTypes.UNLINK_LDAP_GROUP_REQUEST,
+        AdminTypes.UNLINK_LDAP_GROUP_SUCCESS,
+        AdminTypes.UNLINK_LDAP_GROUP_FAILURE,
         state,
         action
     );
@@ -300,6 +340,16 @@ function uploadPlugin(state: RequestStatusType = initialRequestState(), action: 
     );
 }
 
+function installPluginFromUrl(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+    return handleRequest(
+        AdminTypes.INSTALL_PLUGIN_FROM_URL_REQUEST,
+        AdminTypes.INSTALL_PLUGIN_FROM_URL_SUCCESS,
+        AdminTypes.INSTALL_PLUGIN_FROM_URL_FAILURE,
+        state,
+        action
+    );
+}
+
 function getPlugins(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
     return handleRequest(
         AdminTypes.GET_PLUGIN_REQUEST,
@@ -330,27 +380,27 @@ function removePlugin(state: RequestStatusType = initialRequestState(), action: 
     );
 }
 
-function activatePlugin(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+function enablePlugin(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
     return handleRequest(
-        AdminTypes.ACTIVATE_PLUGIN_REQUEST,
-        AdminTypes.ACTIVATE_PLUGIN_SUCCESS,
-        AdminTypes.ACTIVATE_PLUGIN_FAILURE,
+        AdminTypes.ENABLE_PLUGIN_REQUEST,
+        AdminTypes.ENABLE_PLUGIN_SUCCESS,
+        AdminTypes.ENABLE_PLUGIN_FAILURE,
         state,
         action
     );
 }
 
-function deactivatePlugin(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
+function disablePlugin(state: RequestStatusType = initialRequestState(), action: GenericAction): RequestStatusType {
     return handleRequest(
-        AdminTypes.DEACTIVATE_PLUGIN_REQUEST,
-        AdminTypes.DEACTIVATE_PLUGIN_SUCCESS,
-        AdminTypes.DEACTIVATE_PLUGIN_FAILURE,
+        AdminTypes.DISABLE_PLUGIN_REQUEST,
+        AdminTypes.DISABLE_PLUGIN_SUCCESS,
+        AdminTypes.DISABLE_PLUGIN_FAILURE,
         state,
         action
     );
 }
 
-export default combineReducers({
+export default (combineReducers({
     getLogs,
     getAudits,
     getConfig,
@@ -364,9 +414,13 @@ export default combineReducers({
     createCompliance,
     getCompliance,
     uploadBrandImage,
+    deleteBrandImage,
     getClusterStatus,
     testLdap,
     syncLdap,
+    getLdapGroups,
+    linkLdapGroup,
+    unlinkLdapGroup,
     getSamlCertificateStatus,
     uploadPublicSamlCertificate,
     uploadPrivateSamlCertificate,
@@ -380,10 +434,10 @@ export default combineReducers({
     removeLicense,
     getAnalytics,
     uploadPlugin,
+    installPluginFromUrl,
     getPlugins,
     getPluginStatuses,
     removePlugin,
-    activatePlugin,
-    deactivatePlugin,
-});
-
+    enablePlugin,
+    disablePlugin,
+}): (AdminRequestsStatuses, GenericAction) => AdminRequestsStatuses);

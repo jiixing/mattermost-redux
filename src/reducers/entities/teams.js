@@ -2,7 +2,7 @@
 // See LICENSE.txt for license information.
 
 import {combineReducers} from 'redux';
-import {ChannelTypes, TeamTypes, UserTypes, SchemeTypes} from 'action_types';
+import {ChannelTypes, TeamTypes, UserTypes, SchemeTypes, GroupTypes} from 'action_types';
 import {teamListToMap} from 'utils/team_utils';
 
 function currentTeamId(state = '', action) {
@@ -27,6 +27,7 @@ function teams(state = {}, action) {
 
     case TeamTypes.CREATED_TEAM:
     case TeamTypes.UPDATED_TEAM:
+    case TeamTypes.PATCHED_TEAM:
     case TeamTypes.RECEIVED_TEAM:
         return {
             ...state,
@@ -158,7 +159,7 @@ function myMembers(state = {}, action) {
             ...state,
             [teamId]: {
                 ...member,
-                msg_count: Math.max(member.msg_count - amount, 0),
+                msg_count: Math.max(member.msg_count - Math.abs(amount), 0),
             },
         };
     }
@@ -319,6 +320,44 @@ function stats(state = {}, action) {
     }
 }
 
+function groupsAssociatedToTeam(state = {}, action) {
+    switch (action.type) {
+    case GroupTypes.RECEIVED_GROUPS_ASSOCIATED_TO_TEAM: {
+        const {teamID, groups, totalGroupCount} = action.data;
+        const nextState = {...state};
+        const associatedGroupIDs = new Set(state[teamID] ? state[teamID].ids : []);
+        for (const group of groups) {
+            associatedGroupIDs.add(group.id);
+        }
+        nextState[teamID] = {ids: Array.from(associatedGroupIDs), totalCount: totalGroupCount};
+        return nextState;
+    }
+    case GroupTypes.RECEIVED_ALL_GROUPS_ASSOCIATED_TO_TEAM: {
+        const {teamID, groups} = action.data;
+        const nextState = {...state};
+        const associatedGroupIDs = new Set([]);
+        for (const group of groups) {
+            associatedGroupIDs.add(group.id);
+        }
+        const ids = Array.from(associatedGroupIDs);
+        nextState[teamID] = {ids, totalCount: ids.length};
+        return nextState;
+    }
+    case GroupTypes.RECEIVED_GROUPS_NOT_ASSOCIATED_TO_TEAM: {
+        const {teamID, groups} = action.data;
+        const nextState = {...state};
+        const associatedGroupIDs = new Set(state[teamID] ? state[teamID].ids : []);
+        for (const group of groups) {
+            associatedGroupIDs.delete(group.id);
+        }
+        nextState[teamID] = Array.from(associatedGroupIDs);
+        return nextState;
+    }
+    default:
+        return state;
+    }
+}
+
 function updateTeamMemberSchemeRoles(state, action) {
     const {teamId, userId, isSchemeUser, isSchemeAdmin} = action.data;
     const team = state[teamId];
@@ -341,6 +380,16 @@ function updateTeamMemberSchemeRoles(state, action) {
     return state;
 }
 
+function totalCount(state = 0, action) {
+    switch (action.type) {
+    case TeamTypes.RECEIVED_TOTAL_TEAM_COUNT: {
+        return action.data;
+    }
+    default:
+        return state;
+    }
+}
+
 export default combineReducers({
 
     // the current selected team
@@ -357,4 +406,8 @@ export default combineReducers({
 
     // object where every key is the team id and has an object with the team stats
     stats,
+
+    groupsAssociatedToTeam,
+
+    totalCount,
 });

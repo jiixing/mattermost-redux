@@ -20,13 +20,11 @@ class WebSocketClient {
         this.errorCallback = null;
         this.closeCallback = null;
         this.connectingCallback = null;
-        this.dispatch = null;
-        this.getState = null;
         this.stop = false;
         this.platform = '';
     }
 
-    initialize(token, dispatch, getState, opts) {
+    initialize(token, opts) {
         const defaults = {
             forceConnection: true,
             connectionUrl: this.connectionUrl,
@@ -51,13 +49,7 @@ class WebSocketClient {
 
             if (connectionUrl == null) {
                 console.log('websocket must have connection url'); //eslint-disable-line no-console
-                reject('websocket must have connection url');
-                return;
-            }
-
-            if (!dispatch) {
-                console.log('websocket must have a dispatch'); //eslint-disable-line no-console
-                reject('websocket must have a dispatch');
+                reject(new Error('websocket must have connection url'));
                 return;
             }
 
@@ -67,7 +59,7 @@ class WebSocketClient {
 
             Socket = webSocketConnector;
             if (this.connectingCallback) {
-                this.connectingCallback(dispatch, getState);
+                this.connectingCallback();
             }
 
             const regex = /^(?:https?|wss?):(?:\/\/)?[^/]*/;
@@ -88,14 +80,15 @@ class WebSocketClient {
                 }
             } else {
                 // If we're unable to set the origin header, the websocket won't connect, but the URL is likely malformed anyway
-                console.warn('websocket failed to parse origin from ' + connectionUrl); // eslint-disable-line no-console
+                const errorMessage = 'websocket failed to parse origin from ' + connectionUrl;
+                console.warn(errorMessage); // eslint-disable-line no-console
+                reject(new Error(errorMessage));
+                return;
             }
 
             this.conn = new Socket(connectionUrl, [], {headers: {origin}, ...(additionalOptions || {})});
             this.connectionUrl = connectionUrl;
             this.token = token;
-            this.dispatch = dispatch;
-            this.getState = getState;
 
             this.conn.onopen = () => {
                 if (token && platform !== 'android') {
@@ -107,10 +100,10 @@ class WebSocketClient {
                 if (this.connectFailCount > 0) {
                     console.log('websocket re-established connection'); //eslint-disable-line no-console
                     if (this.reconnectCallback) {
-                        this.reconnectCallback(this.dispatch, this.getState);
+                        this.reconnectCallback();
                     }
                 } else if (this.firstConnectCallback) {
-                    this.firstConnectCallback(this.dispatch, this.getState);
+                    this.firstConnectCallback();
                 }
 
                 this.connectFailCount = 0;
@@ -128,7 +121,7 @@ class WebSocketClient {
                 this.connectFailCount++;
 
                 if (this.closeCallback) {
-                    this.closeCallback(this.connectFailCount, this.dispatch, this.getState);
+                    this.closeCallback(this.connectFailCount);
                 }
 
                 let retryTime = MIN_WEBSOCKET_RETRY_TIME;
@@ -141,12 +134,17 @@ class WebSocketClient {
                     }
                 }
 
-                setTimeout(
+                if (this.connectionTimeout) {
+                    clearTimeout(this.connectionTimeout);
+                }
+
+                this.connectionTimeout = setTimeout(
                     () => {
                         if (this.stop) {
+                            clearTimeout(this.connectionTimeout);
                             return;
                         }
-                        this.initialize(token, dispatch, getState, Object.assign({}, opts, {forceConnection: true}));
+                        this.initialize(token, opts);
                     },
                     retryTime
                 );
@@ -159,7 +157,7 @@ class WebSocketClient {
                 }
 
                 if (this.errorCallback) {
-                    this.errorCallback(evt, this.dispatch, this.getState);
+                    this.errorCallback(evt);
                 }
             };
 
@@ -170,7 +168,7 @@ class WebSocketClient {
                         console.warn(msg); //eslint-disable-line no-console
                     }
                 } else if (this.eventCallback) {
-                    this.eventCallback(msg, this.dispatch, this.getState);
+                    this.eventCallback(msg);
                 }
             };
         });
@@ -223,7 +221,7 @@ class WebSocketClient {
             this.conn.send(JSON.stringify(msg));
         } else if (!this.conn || this.conn.readyState === Socket.CLOSED) {
             this.conn = null;
-            this.initialize(this.token, this.dispatch, this.getState, {forceConnection: true, platform: this.platform});
+            this.initialize(this.token, {platform: this.platform});
         }
     }
 
